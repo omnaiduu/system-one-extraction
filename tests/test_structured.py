@@ -42,14 +42,14 @@ def test_prompts_schema_and_shots():
     row = _dev()[0]
     fields = sb.field_list(row)
     messages = sb.messages_for(row, fields, shots)
-    assert len(messages) == 7 and messages[-1]["role"] == "user" and row["text"] in messages[-1]["content"]
-    assert json.loads(messages[1]["content"])  # gold JSON for the examples
+    assert len(messages) == 8 and messages[0]["role"] == "system" and messages[-1]["role"] == "user"
+    assert row["text"] in messages[-1]["content"] and json.loads(messages[2]["content"])  # gold JSON for the examples
     schema = sb.schema_for(fields)
     assert set(schema["properties"]) == {f["field"] for f in fields}
     computed = next(r for r in chain_test_variants(_dev()[:1], seed=23))
     only = sb.field_list(computed, only=["calc_0"])
     assert [f["field"] for f in only] == ["calc_0"]
-    assert "calculate" in sb.RULES
+    assert "calculate" in sb.SYSTEM and sb.SYSTEM.count("Answer:\n{") == 3
 
 
 def test_structured_kernel_has_no_exam4_and_installs_the_enforcer(tmp_path):
@@ -63,3 +63,13 @@ def test_structured_kernel_has_no_exam4_and_installs_the_enforcer(tmp_path):
     assert not any(n.startswith("data/exam4") for n in names)
     meta = json.loads((tmp_path / "s" / "kernel-metadata.json").read_text())
     assert meta["dataset_sources"] == ["urbikn/sroie-datasetv2"]
+
+
+def test_system_prompt_examples_are_correct_and_not_from_the_exams():
+    """The three worked answers parse as JSON, and their arithmetic is right."""
+    answers = [json.loads(line) for line in sb.SYSTEM.splitlines() if line.startswith("{")]
+    assert answers[0]["total"] == 1200 + 286.75 and answers[0]["due"] == "2026-06-25" and answers[0]["tracking"] is None
+    assert answers[1]["final_price"] == round(2400 * 0.85 * 1.18, 2) and answers[1]["share"] == 900 / 4
+    assert answers[1]["arrival"] == "2026-05-01" and answers[2]["amount"] == 120000 and answers[2]["nights"] == 4
+    exam_text = " ".join(r["text"] for r in _dev())
+    assert "Adriatic Pipeworks d.o.o. - invoice AP-2745" not in exam_text

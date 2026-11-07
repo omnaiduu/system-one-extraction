@@ -1,6 +1,9 @@
 """The baseline the user asked for: the same Gemma 4 E2B, untrained, writing JSON.
 
-Gemma reads the field list and the note and generates one JSON object, with
+Gemma gets a system prompt (how to answer each type, the rules on nulls,
+decoys and calculations, and three worked examples written for this purpose,
+not taken from any exam), reads the field list and the note, and generates one
+JSON object, with
 decoding constrained to a JSON schema (lm-format-enforcer) when that library
 works with this model, else free generation and a JSON parse (the mode used is
 recorded). No LoRA, no heads, no training.
@@ -31,13 +34,59 @@ from experiments.evidence_data import questions
 from experiments.values import matches
 from extractor.audit import Drop, parse_date, parse_datetime, parse_number, parse_time
 
-RULES = (
-    "Extract the fields below from the document and reply with one JSON object only, one key per field.\n"
-    "Use null when the value is not in the document. Formats: dates YYYY-MM-DD; times HH:MM (24-hour); "
-    "date-times YYYY-MM-DDTHH:MM; numbers as plain numbers without currency or thousands separators; "
-    "durations as a whole number of days; lists as arrays of strings in document order; text exactly as "
-    "written in the document. When a value must be calculated from the document, calculate it."
-)
+SYSTEM = """You are a precise information-extraction engine. You read one document and return the values of the requested fields as a single JSON object. You never explain, never add keys, never wrap the JSON in markdown.
+
+How to answer each type:
+- text: copy the exact words from the document, character for character (same spelling, capitals and punctuation). Do not shorten, expand or tidy them.
+- number: a plain JSON number, no currency, no thousands separators, no units: 1486.75, not "Rs 1,486.75".
+- date: "YYYY-MM-DD". Read any format, including words ("the second of April, 2026" -> "2026-04-02"). Two-number dates like 04/06/2026 are day first.
+- time: "HH:MM" on a 24-hour clock ("2:15 pm" -> "14:15").
+- date-time: "YYYY-MM-DDTHH:MM".
+- days: a whole number of days.
+- list: a JSON array of the exact items, in the order they appear in the document.
+
+Rules that matter:
+1. Use null when the document does not contain the value. Never guess, never invent.
+2. Documents contain decoys: other invoices, old prices, a spare part that "is not this ticket", a reference "not copied onto this note". Answer for the thing the field asks about, not the decoy.
+3. When a value is not printed but can be calculated from what is printed, calculate it exactly: totals, differences, percentages, discounts, taxes, averages, per-person shares, dates plus or minus days or weeks, days between dates. Work in the order the document describes. Round money to 2 decimals only at the end.
+4. Numbers written in words are still numbers: "one lakh twenty thousand" is 120000; "fourteen days" is 14.
+5. Instructions after each field name say exactly what is wanted; follow them literally.
+
+Example 1
+Fields:
+- supplier (text): Company that issued the invoice
+- invoice_no (text): Invoice number of this invoice
+- total (number): Total of the line items
+- due (date): Payment due date
+- tracking (text): Courier tracking number
+Document:
+Adriatic Pipeworks d.o.o. - invoice AP-2745, dated 4 June 2026. Pipes 1,200.00 and fittings 286.75. Payment within 21 days. The cancelled invoice AP-2749 should be ignored.
+Answer:
+{"supplier": "Adriatic Pipeworks d.o.o.", "invoice_no": "AP-2745", "total": 1486.75, "due": "2026-06-25", "tracking": null}
+
+Example 2
+Fields:
+- final_price (number): Price after the discount and the tax
+- share (number): What each flatmate pays
+- arrival (date): Date the parcel arrives
+Document:
+Subtotal Rs 2,400. 15% off for members, then 18% GST on the discounted amount. Rent of 900 is split equally between 4 flatmates. Shipped 10/04/2026; it arrives 3 weeks later.
+Answer:
+{"final_price": 2407.2, "share": 225, "arrival": "2026-05-01"}
+
+Example 3
+Fields:
+- amount (number): Amount on the cheque
+- signed (date): Date the cheque was signed
+- items (list): Items ordered
+- pickup (time): Pickup time
+- nights (days): Length of the stay
+Document:
+Pay Rupees One Lakh Twenty Thousand Only. Signed on the second of April, 2026. Order: oak table, two chairs, a lamp. Pickup at 2:15 pm. Check-in 3 March 2026, check-out 7 March 2026.
+Answer:
+{"amount": 120000, "signed": "2026-04-02", "items": ["oak table", "two chairs", "a lamp"], "pickup": "14:15", "nights": 4}
+"""
+# The user turn: the fields, then the document, in the same layout as the examples.
 TYPE_HINT = {"text": "text", "list": "list of text", "number": "number", "estimate": "number", "duration": "days",
              "date": "date", "time": "time", "datetime": "date-time"}
 
@@ -68,9 +117,9 @@ def field_list(row: dict, only: list[str] | None = None) -> list[dict]:
 
 
 def user_message(row: dict, fields: list[dict]) -> str:
-    lines = [RULES, "", "Fields:"]
+    lines = ["Fields:"]
     lines += [f"- {f['field']} ({TYPE_HINT.get(f['type'], f['type'])}): {f['instruction']}" for f in fields]
-    lines += ["", "Document:", row["text"]]
+    lines += ["Document:", row["text"], "Answer:"]
     return "\n".join(lines)
 
 
@@ -83,7 +132,9 @@ def gold_json(fields: list[dict]) -> str:
 
 
 def messages_for(row: dict, fields: list[dict], shots: list[tuple[dict, list[dict]]]) -> list[dict]:
-    messages = []
+    """The system prompt (rules and three worked examples), then optional real training notes
+    as earlier turns with their gold JSON, then this note."""
+    messages = [{"role": "system", "content": SYSTEM}]
     for shot_row, shot_fields in shots:
         messages.append({"role": "user", "content": user_message(shot_row, shot_fields)})
         messages.append({"role": "assistant", "content": gold_json(shot_fields)})
