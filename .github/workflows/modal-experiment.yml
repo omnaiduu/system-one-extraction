@@ -27,12 +27,14 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 200
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       PROMPTS: ${{ github.event.inputs.prompts || 'last_nobos,last,first' }}
+      # Empty = CPU (no card needed). Set a repository variable MODAL_GPU, e.g. A10G, to use a GPU.
+      MODAL_GPU: ${{ vars.MODAL_GPU }}
       GPU_RUN: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, '[run]') }}
     steps:
       - uses: actions/checkout@v4

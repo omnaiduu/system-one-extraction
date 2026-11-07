@@ -27,6 +27,10 @@ sys.path.insert(0, str(ROOT))
 
 MODEL = "google/gemma-4-E2B-it"
 REMOTE = "/root/repo"
+# Modal asks for a card before it starts any GPU. Without one, run on CPU:
+# leave MODAL_GPU empty. Set it to e.g. "A10G" once a card is on the account.
+GPU = os.environ.get("MODAL_GPU", "").strip() or None
+CPUS = 8.0
 
 app = modal.App("evidence-question-order")
 volume = modal.Volume.from_name("gemma-cache", create_if_missing=True)
@@ -46,7 +50,7 @@ def _log(message: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
-def _load_model(token):
+def _load_model(token, device):
     import torch
     import transformers
 
@@ -56,7 +60,7 @@ def _load_model(token):
         if loader is None:
             continue
         try:
-            model = loader.from_pretrained(MODEL, token=token, torch_dtype=torch.bfloat16, device_map="cuda")
+            model = loader.from_pretrained(MODEL, token=token, torch_dtype=torch.bfloat16, device_map=device)
             _log(f"loaded {MODEL} with {name} as {type(model).__name__}")
             return model
         except Exception as exc:  # try the next auto class
@@ -64,7 +68,15 @@ def _load_model(token):
     raise RuntimeError("could not load Gemma:\n" + "\n".join(errors))
 
 
-@app.function(image=image, gpu="A10G", timeout=90 * 60, memory=32768, volumes={"/cache": volume}, secrets=[hf_secret])
+@app.function(
+    image=image,
+    gpu=GPU,
+    cpu=CPUS,
+    timeout=(90 if GPU else 180) * 60,
+    memory=32768,
+    volumes={"/cache": volume},
+    secrets=[hf_secret],
+)
 def run(prompts: list[str]) -> dict:
     import torch
     import transformers
@@ -76,10 +88,14 @@ def run(prompts: list[str]) -> dict:
     from experiments.evidence_heads import run_all
 
     started = time.time()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu":
+        torch.set_num_threads(int(CPUS))
+    _log(f"device {device}, {torch.get_num_threads()} threads")
     token = os.environ.get("HF_TOKEN") or None
     _log(f"transformers {transformers.__version__}, torch {torch.__version__}, hf token {'set' if token else 'not set'}")
     tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL, token=token)
-    model = _load_model(token)
+    model = _load_model(token, device)
     model.eval()
     volume.commit()
 
@@ -87,7 +103,7 @@ def run(prompts: list[str]) -> dict:
 
     def forward(ids, add_bos):
         with torch.no_grad():
-            out = model(input_ids=torch.tensor([ids], device="cuda"), output_hidden_states=True, use_cache=False)
+            out = model(input_ids=torch.tensor([ids], device=device), output_hidden_states=True, use_cache=False)
         hidden = out.hidden_states
         if hidden is None:
             raise RuntimeError("model returned no hidden states")
@@ -109,14 +125,16 @@ def run(prompts: list[str]) -> dict:
         _log(f"{prompt}: {len(items)} questions, {check}")
 
     del model
-    torch.cuda.empty_cache()
-    results = run_all(items_by_prompt, states_by_prompt, "cuda", log=_log)
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    results = run_all(items_by_prompt, states_by_prompt, device, log=_log)
     payload = {
         "model": MODEL,
         "transformers": transformers.__version__,
         "torch": torch.__version__,
         "layers": picked,
         "build": checks,
+        "device": device,
         "seconds": round(time.time() - started, 1),
         "results": results,
     }
