@@ -73,6 +73,33 @@ def main_chains() -> None:
     run_job(layout="multi", epochs=EPOCHS, prefix="lora_chains", run_frozen=False, chains=True)
 
 
+def main_grammar() -> None:
+    """Experiment 7: computed fields from a sentence grammar, a step head that sees one operand,
+    marks snapped to whole numbers, and plain Gemma reading words the rules cannot."""
+    run_job(layout="multi", epochs=EPOCHS, prefix="lora_grammar", run_frozen=False, grammar=True)
+
+
+def grammar_rows(rows: list[dict]) -> list[dict]:
+    """Training notes; two grammar copies of each (one single-step and one two-step field);
+    words copies of half of them, so the tagger learns to mark numbers and dates written in
+    words (reading them is Gemma's job at test time). Exams 1-3 four times each with one
+    computed field (dev_single, dev_combo_seen, dev_combo_unseen, dev_combo_unseen_familiar),
+    and once with words (dev_words)."""
+    import random as _random
+
+    from experiments.augment import TEST_TEMPLATES, augment
+    from experiments.chains import grammar_test_variants, grammar_training_variants
+
+    train = [row for row in rows if row["split"] == "train"]
+    dev = [row for row in rows if row["split"] in ("exam1", "exam2", "exam3")]
+    half = sorted(_random.Random(5).sample(range(len(train)), len(train) // 2))
+    out = list(rows) + grammar_training_variants(train, seed=11, copies=2)
+    out += augment([train[i] for i in half], seed=13, words=1, emits=0)
+    out += [{**row, "split": f"dev_{row['chain_test']}"} for row in grammar_test_variants(dev, seed=23)]
+    out += [{**row, "split": "dev_words"} for row in augment(dev, seed=29, words=1, emits=0, templates=TEST_TEMPLATES)]
+    return out
+
+
 def chain_rows(rows: list[dict]) -> list[dict]:
     """Training notes plus two copies each with one single-step and one two-step field
     (training phrasings); exams 1-3 three times each with a held-out phrasing, as
@@ -101,7 +128,8 @@ def augmented_rows(rows: list[dict]) -> list[dict]:
     return out
 
 
-def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool = False, chains: bool = False) -> None:
+def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool = False, chains: bool = False,
+            grammar: bool = False) -> None:
     import torch
     import transformers
     from peft import LoraConfig, inject_adapter_in_model
@@ -134,6 +162,8 @@ def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool 
         rows = augmented_rows(rows)
     if chains:
         rows = chain_rows(rows)
+    if grammar:
+        rows = grammar_rows(rows)
     probe = tokenizer(rows[0]["text"], add_special_tokens=True)["input_ids"]
     with torch.no_grad():
         hidden = forward(probe)
@@ -187,12 +217,27 @@ def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool 
     readers = None
     if emit:
         readers = {name: r.to(device) for name, r in make_readers(len(layers), hidden[0].shape[-1]).items()}
-    step_head = StepHead(len(layers), hidden[0].shape[-1]).to(device) if chains else None
+    step_head = None
+    if chains:
+        step_head = StepHead(len(layers), hidden[0].shape[-1]).to(device)
+    if grammar:
+        step_head = StepHead(len(layers), hidden[0].shape[-1], pair_context=False, step_embedding=False).to(device)
+    rewriter = None
+    if grammar:
+        from experiments.rewrite import make_rewriter
+
+        rewrite_stats: dict = {}
+        rewriter = make_rewriter(model, tokenizer, device, rewrite_stats)
+        log(f"rewriter ready; smoke test: {rewriter('one thousand two hundred and fifty', 'number')} "
+            f"{rewriter('the second of April, 2026', 'date')} {rewrite_stats}")
     t0 = time.time()
     result = train_lora(
         parts_by_prompt[layout], forward, adapter_params, head, layers, device,
-        epochs=epochs, set_train=lambda flag: model.train(flag), op_head=op_head, readers=readers, step_head=step_head, log=log,
+        epochs=epochs, set_train=lambda flag: model.train(flag), op_head=op_head, readers=readers, step_head=step_head,
+        snap=grammar, rewriter=rewriter, log=log,
     )
+    if rewriter is not None:
+        payload["rewrite_stats"] = rewrite_stats
     best = result.pop("_best")
     result["seconds"] = round(time.time() - t0, 1)
     payload["results"][f"lora {layout}, {epochs} epochs"] = result
@@ -200,6 +245,7 @@ def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool 
                 "adapter": best["adapter"], "head": best["head"], "op_head": best["heads"][1], "layers": layers,
                 "readers": dict(zip(readers, best["heads"][2 : 2 + len(readers)])) if readers else None,
                 "step_head": best["heads"][-1] if step_head is not None else None,
+                "step_head_config": step_head.config if step_head is not None else None, "snap": grammar,
                 "lora": payload["lora"], "bias": best["bias"], "layout": layout}, OUT / f"{prefix}_adapter.pt")
 
     payload["seconds"] = round(time.time() - started, 1)

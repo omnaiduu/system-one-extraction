@@ -284,3 +284,319 @@ def test_variants(rows: list[dict], seed: int) -> list[dict]:
             if variant:
                 out.append({**variant, "chain_test": set_name})
     return out
+
+
+# ---- experiment 7: a grammar instead of templates ----------------------------
+#
+# Experiment 6 trained on 26 fixed sentences and learned them: amounts were
+# found only where those sentences put them, and the step head learned whole
+# pairs ("a discount is followed by a discount"). Here a sentence is built from
+# parts: an opening that states the starting value, then one clause per step,
+# joined by a connector. Each block has its own clauses, so a block reads the
+# same in any position; every pair of blocks is generated except a held-out
+# set; and every part has training and test wordings. Numbers and dates are
+# printed in several styles, with currency outside the mark.
+#
+# Fold order is text order: the starting value comes first, then each step's
+# operand. Percent and date blocks are order-free in `values.apply_block`.
+
+G_OPEN_NUMBER = {
+    "train": [("Subtotal {A}", "subtotal"), ("The bill comes to {A}", "bill"), ("{A} is the list price", "list price"),
+              ("Base fare: {A}", "fare"), ("The order is worth {A}", "order"), ("Quoted at {A}", "quote"),
+              ("The rent is {A}", "rent"), ("Membership costs {A}", "membership")],
+    "test": [("Net value before adjustments is {A}", "net value"), ("The invoice shows {A}", "invoice"),
+             ("{A} was the opening figure", "opening figure"), ("Course fees stand at {A}", "course fee")],
+}
+G_OPEN_DATE = {
+    "train": [("Dated {D}", "document"), ("Work began on {D}", "work"), ("The order was placed {D}", "order"),
+              ("Signed on {D}", "contract"), ("The trip starts {D}", "trip")],
+    "test": [("Received {D}", "parcel"), ("The kickoff was {D}", "project")],
+}
+G_STEPS = {
+    "minus_percent": {"train": ["{R} off", "less a {R} discount", "minus {R} for members", "with a {R} reduction",
+                                "discounted by {R}", "after {R} is knocked off"],
+                      "test": ["{R} cheaper in the sale", "a {R} rebate is taken off", "reduced {R} for early payment"]},
+    "plus_percent": {"train": ["plus {R} GST", "with {R} tax added", "{R} VAT on top", "add a {R} surcharge",
+                               "marked up by {R}", "plus a {R} service charge"],
+                     "test": ["{R} sales tax is then applied", "raised by {R}", "a {R} levy is added"]},
+    "percent_of": {"train": ["{R} of that is the commission", "the fee is {R} of it", "{R} of it goes to tax"],
+                   "test": ["the agent's cut is {R} of that", "only {R} of it is refundable"]},
+    "add": {"train": ["plus {B} for delivery", "and {B} for labour", "with {B} shipping added", "adding {B} in fees",
+                      "and another {B} for parts"],
+            "test": ["topped up with {B} for packing", "{B} extra for insurance"]},
+    "subtract": {"train": ["minus a {B} deposit", "less {B} paid in advance", "after deducting {B} already paid",
+                           "with {B} credited back"],
+                 "test": ["{B} was refunded from that", "net of a {B} advance"]},
+    "multiply": {"train": ["for {K} months", "times {K} units", "for each of {K} guests", "across {K} rooms", "for {K} nights"],
+                 "test": ["repeated for {K} weeks of service", "for all {K} seats"]},
+    "divide": {"train": ["split between {K} people", "shared by {K} teams", "spread over {K} months", "divided among {K} tenants"],
+               "test": ["paid in {K} equal parts", "split {K} ways equally"]},
+    "add_days": {"train": ["due {N} later", "then {N} to deliver", "with {N} more for checks", "{N} after that"],
+                 "test": ["allow {N} beyond that", "a further {N} pass"]},
+    "minus_days": {"train": ["but ship {N} before that", "the reminder goes {N} earlier", "{N} ahead of that"],
+                   "test": ["pulled forward by {N}", "{N} prior to that"]},
+    "add_weeks": {"train": ["{W} later", "after {W}", "plus {W} of testing"],
+                  "test": ["{W} on from that"]},
+    "minus_weeks": {"train": ["{W} before that", "{W} earlier"],
+                    "test": ["{W} ahead of time"]},
+}
+G_JOIN = {"train": [", ", "; then ", ", then ", ". Then ", " and "],
+          "test": [". After that, ", ", followed by ", " - then "]}
+G_ASK_NUMBER = {"train": ["{Topic} after all adjustments", "Final {topic} amount", "What the {topic} comes to in the end"],
+                "test": ["{Topic}, settled figure", "End value of the {topic}"]}
+G_ASK_DATE = {"train": ["{Topic} date after the changes", "Final date for the {topic}"],
+              "test": ["Date the {topic} lands on"]}
+G_AVERAGE = {"train": [("The three readings were {A}, {B} and {C}", "Average of the three readings"),
+                       ("Logged weights: {A}, {B}, {C}", "Mean of the logged weights"),
+                       ("Sales ran {A}, {B} and {C} over three months", "Average monthly sales")],
+             "test": [("Weighings came to {A}, {B} and {C}", "Mean of the weighings")]}
+
+NUMBER_STEP_BLOCKS = ("add", "subtract", "multiply", "divide", "minus_percent", "plus_percent", "percent_of")
+DATE_STEP_BLOCKS = ("add_days", "minus_days", "add_weeks", "minus_weeks")
+LAST_ONLY = {"percent_of"}
+# Pairs never generated for training. Each block appears first and second elsewhere.
+HELD_OUT_PAIRS = {("minus_percent", "plus_percent"), ("multiply", "plus_percent"), ("add", "minus_percent"),
+                  ("plus_percent", "divide"), ("subtract", "percent_of"), ("divide", "add"),
+                  ("add_weeks", "minus_days"), ("minus_days", "add_weeks")}
+
+
+def all_pairs(kind: str) -> list[tuple[str, str]]:
+    blocks = NUMBER_STEP_BLOCKS if kind == "number" else DATE_STEP_BLOCKS
+    return [(a, b) for a in blocks for b in blocks if a not in LAST_ONLY]
+
+
+def _render_amount(value: Decimal, rng: random.Random, currency: str | None = None) -> tuple[str, str]:
+    """(printed number, currency in front). The mark covers the number only. One currency per sentence."""
+    if value == value.to_integral_value() and rng.random() < 0.5:
+        number = f"{int(value):,}" if rng.random() < 0.6 else str(int(value))
+    else:
+        number = f"{value:,.2f}" if rng.random() < 0.7 else f"{value:.2f}"
+    if currency is None:
+        currency = rng.choice(CURRENCIES)
+    return number, currency
+
+
+CURRENCIES = ["", "", "Rs ", "Rs. ", "₹", "$", "INR "]
+
+
+def _render_date(d: date, rng: random.Random) -> str:
+    month = MONTH_NAMES[d.month - 1]
+    style = rng.randrange(5)
+    if style == 0:
+        return f"{d.day} {month} {d.year}"
+    if style == 1:
+        return f"{month} {d.day}, {d.year}"
+    if style == 2:
+        return f"{d.day} {month[:3]} {d.year}"
+    if style == 3:
+        return d.isoformat()
+    return f"{d.day:02d}/{d.month:02d}/{d.year}"
+
+
+def _amount(rng: random.Random, low: int, high: int) -> Decimal:
+    if rng.random() < 0.3:
+        return Decimal(rng.randint(low, high))
+    return Decimal(rng.randint(low * 100, high * 100)) / 100
+
+
+def _operand(block: str, start, rng: random.Random):
+    """(value, how it prints, placeholder) for one step's operand."""
+    if block in ("minus_percent", "plus_percent", "percent_of"):
+        r = Decimal(rng.choice(RATES))
+        return r, str(r), "R", rng.choice(["%", "%", " per cent", " percent"])
+    if block in ("add", "subtract"):
+        top = max(20, int(abs(start) * Decimal("0.4"))) if isinstance(start, Decimal) else 2000
+        return _amount(rng, 10, top), None, "B", ""
+    if block in ("multiply", "divide"):
+        k = Decimal(rng.randint(2, 12))
+        return k, str(k), "K", ""
+    if block in ("add_days", "minus_days"):
+        n = Decimal(rng.randint(2, 30))
+        return n, str(n), "N", " days"
+    w = Decimal(rng.randint(1, 8))
+    return w, str(w), "W", " week" if w == 1 else " weeks"
+
+
+def _sentence_parts(pieces):
+    """Join (text, slot) pieces and record each slot's character span."""
+    out, where = "", []
+    for text, slot in pieces:
+        if slot is not None:
+            where.append((slot, len(out), len(out) + len(text)))
+        out += text
+    return out, where
+
+
+def _capitalise(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def grammar_field(rng: random.Random, kind: str, blocks: list[str], wording: str, used_topics: set):
+    """One generated sentence and its field (without placement). None if it could not be built."""
+    from experiments.values import apply_block
+
+    other = "test" if wording == "train" else "train"
+    if blocks == ["average"]:
+        sentence, instruction = rng.choice(G_AVERAGE[wording])
+        values = [_amount(rng, 10, 900) for _ in range(3)]
+        money = rng.choice(CURRENCIES)
+        pieces, slot_values = [], []
+        for chunk in re.split(r"(\{[ABC]\})", sentence):
+            if chunk in ("{A}", "{B}", "{C}"):
+                number, currency = _render_amount(values[len(slot_values)], rng, money)
+                pieces += [(currency, None), (number, len(slot_values))]
+                slot_values.append(values[len(slot_values)])
+            elif chunk:
+                pieces.append((chunk, None))
+        text, where = _sentence_parts(pieces + [(".", None)])
+        exact = sum(values) / 3
+        return text, where, slot_values, ["number"] * 3, instruction, exact, "average"
+    opens = [o for o in (G_OPEN_NUMBER if kind == "number" else G_OPEN_DATE)[wording] if o[1] not in used_topics]
+    if not opens:
+        return None
+    opening, topic = rng.choice(opens)
+    used_topics.add(topic)
+    pieces, values, kinds = [], [], []
+    money = rng.choice(CURRENCIES)
+    if kind == "number":
+        start = _amount(rng, 100, 5000)
+        number, currency = _render_amount(start, rng, money)
+        before, after = opening.split("{A}")
+        pieces += [(before, None), (currency, None), (number, 0), (after, None)]
+    else:
+        start = date(rng.choice((2026, 2027)), rng.randint(1, 12), rng.randint(1, 28))
+        before, after = opening.split("{D}")
+        pieces += [(before, None), (_render_date(start, rng), 0), (after, None)]
+    values.append(start)
+    kinds.append(kind)
+    acc = start
+    for step, block in enumerate(blocks):
+        value, printed, slot, unit = _operand(block, acc, rng)
+        if printed is None:
+            printed, currency = _render_amount(value, rng, money)
+        else:
+            currency = ""
+        clause = rng.choice(G_STEPS[block][wording])
+        joiner = rng.choice(G_JOIN[wording])
+        if clause.startswith("and ") and joiner.strip(" ,;.-") in ("and", "then", "followed by", "After that"):
+            clause = clause[4:]
+        before, after = clause.split("{" + slot + "}")
+        if joiner.endswith(". "):
+            before = _capitalise(before)
+        pieces += [(joiner, None), (before, None), (currency, None), (printed, len(values)), (unit + after, None)]
+        values.append(value)
+        kinds.append("number")
+        acc = apply_block(block, acc, value, False, slot == "R")
+    text, where = _sentence_parts(pieces + [(".", None)])
+    text = _capitalise(text)
+    ask = rng.choice((G_ASK_NUMBER if kind == "number" else G_ASK_DATE)[wording])
+    instruction = ask.format(topic=topic, Topic=_capitalise(topic))
+    return text, where, values, kinds, instruction, acc, "chain"
+
+
+def insert_grammar_field(row: dict, rng: random.Random, kind: str, blocks: list[str], wording: str,
+                         set_name: str, name: str, used_topics: set) -> dict | None:
+    from experiments.evidence_data import field_evidence
+
+    for _ in range(20):
+        built = grammar_field(rng, kind, blocks, wording, set(used_topics))
+        if built is None:
+            return None
+        text, where, values, kinds, instruction, exact, op = built
+        value = exact if isinstance(exact, date) else exact.quantize(Q, ROUND_HALF_UP)
+        if isinstance(value, date):
+            if value.isoformat() in row["text"] + text or _render("d", value) in row["text"] + text:
+                continue
+        elif number_present(row["text"] + " " + text, value, 2):
+            continue
+        break
+    else:
+        return None
+    topic_open = next((t for o, t in G_OPEN_NUMBER[wording] + G_OPEN_DATE[wording] if o.split("{")[0] and text.startswith(_capitalise(o.split("{")[0]))), None)
+    if topic_open:
+        used_topics.add(topic_open)
+    marked = [span for f in row["fields"].values() for span in (field_evidence(f) or [])]
+    base = row["text"]
+    cuts = [i + 2 for i in range(len(base) - 1) if base[i] == "." and base[i + 1] in " \n"
+            and not any(a <= i + 2 < b for a, b in marked)]
+    at = rng.choice(cuts) if cuts else len(base)
+    if at == len(base):
+        pad = 0 if base.endswith((" ", "\n")) else 1
+        insert = (" " if pad else "") + text
+    else:
+        insert, pad = text + " ", 0
+    new_text = base[:at] + insert + base[at:]
+    fields = _move_spans(row, [(at, at, len(insert))])
+    evidence = [{"start": at + pad + a, "end": at + pad + b, "text": text[a:b]} for _, a, b in where]
+    is_date = isinstance(value, date)
+    fields[name] = {
+        "type": "date" if is_date else "number",
+        "instruction": instruction,
+        "compute": op,
+        **({"blocks": list(blocks)} if op == "chain" else {}),
+        "chain_kind": "+".join(blocks),
+        "chain_set": set_name,
+        "steps": len(blocks) if op == "chain" else 1,
+        "missing": False,
+        "value": value.isoformat() if is_date else float(value),
+        "evidence": evidence,
+        "span_kinds": kinds,
+        "span_values": [v.isoformat() if isinstance(v, date) else str(v) for v in values],
+        **({} if is_date else {"decimals": 2}),
+    }
+    return {**row, "text": new_text, "fields": fields}
+
+
+def _pick_single(rng: random.Random) -> tuple[str, list[str]]:
+    if rng.random() < 0.15:
+        return "number", ["average"]
+    kind = "number" if rng.random() < 0.7 else "date"
+    return kind, [rng.choice(NUMBER_STEP_BLOCKS if kind == "number" else DATE_STEP_BLOCKS)]
+
+
+def _pick_pair(rng: random.Random, held_out: bool) -> tuple[str, list[str]]:
+    kind = "number" if rng.random() < 0.75 else "date"
+    pairs = [p for p in all_pairs(kind) if (p in HELD_OUT_PAIRS) == held_out]
+    return kind, list(rng.choice(pairs))
+
+
+def grammar_training_variants(rows: list[dict], seed: int, copies: int = 2) -> list[dict]:
+    """Each training note `copies` times, each copy with one single-step and one two-step field
+    (training wording, never a held-out pair)."""
+    rng = random.Random(seed)
+    out = []
+    for row in rows:
+        for k in range(copies):
+            topics: set = set()
+            variant = row
+            for number, picker in enumerate((_pick_single, lambda r: _pick_pair(r, False))):
+                kind, blocks = picker(rng)
+                variant = insert_grammar_field(variant, rng, kind, blocks, "train",
+                                               "train_single" if number == 0 else "train_combo", f"calc_{number}", topics)
+                if variant is None:
+                    break
+            if variant is not None:
+                out.append({**variant, "id": f"{row['id']}~g{k}", "augment": "chain"})
+    return out
+
+
+GRAMMAR_TESTS = {
+    # name: (wording, how the blocks are picked)
+    "single": ("test", lambda rng: _pick_single(rng)),
+    "combo_seen": ("test", lambda rng: _pick_pair(rng, False)),
+    "combo_unseen": ("test", lambda rng: _pick_pair(rng, True)),
+    # New combinations in training wording: composing alone, with no new words.
+    "combo_unseen_familiar": ("train", lambda rng: _pick_pair(rng, True)),
+}
+
+
+def grammar_test_variants(rows: list[dict], seed: int) -> list[dict]:
+    rng = random.Random(seed)
+    out = []
+    for row in rows:
+        for set_name, (wording, picker) in GRAMMAR_TESTS.items():
+            kind, blocks = picker(rng)
+            variant = insert_grammar_field(row, rng, kind, blocks, wording, set_name, "calc_0", set())
+            if variant is not None:
+                out.append({**variant, "id": f"{row['id']}~{set_name}", "augment": "chain", "chain_test": set_name})
+    return out

@@ -290,15 +290,22 @@ class StepHead(torch.nn.Module):
     after it, and only later tokens have seen them.
     """
 
-    def __init__(self, layers: int, width: int, inner: int = 128, window: int = 4) -> None:
+    def __init__(self, layers: int, width: int, inner: int = 128, window: int = 4,
+                 pair_context: bool = True, step_embedding: bool = True) -> None:
+        """`pair_context` and `step_embedding` are experiment 6's design. With them
+        the head learned whole pairs; experiment 7 turns both off, so each step
+        sees only the answer token and its own operand's surroundings."""
         super().__init__()
+        parts = 3 if pair_context else 2
+        self.config = {"inner": inner, "window": window, "pair_context": pair_context, "step_embedding": step_embedding}
         self.mix = torch.nn.Parameter(torch.zeros(layers))
-        self.norm = torch.nn.LayerNorm(3 * width)
-        self.step = torch.nn.Embedding(MAX_STEPS, 3 * width)
+        self.norm = torch.nn.LayerNorm(parts * width)
+        self.step = torch.nn.Embedding(MAX_STEPS, parts * width) if step_embedding else None
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(3 * width, inner), torch.nn.GELU(), torch.nn.Dropout(0.1), torch.nn.Linear(inner, len(BLOCKS))
+            torch.nn.Linear(parts * width, inner), torch.nn.GELU(), torch.nn.Dropout(0.1), torch.nn.Linear(inner, len(BLOCKS))
         )
         self.window = window
+        self.pair_context = pair_context
 
     def forward(self, doc: torch.Tensor, end: torch.Tensor, spans) -> torch.Tensor | None:
         """doc [K, T, H], end [K, H], spans in text order -> [steps, len(BLOCKS)], or None."""
@@ -313,8 +320,13 @@ class StepHead(torch.nn.Module):
             a, b = span
             return d[a : min(b + 1 + self.window, d.shape[0])].mean(0)
 
-        rows = [torch.cat([e, around(spans[k]), around(spans[k + 1])]) for k in range(steps)]
-        x = torch.stack(rows) + self.step(torch.arange(steps, device=d.device))
+        if self.pair_context:
+            rows = [torch.cat([e, around(spans[k]), around(spans[k + 1])]) for k in range(steps)]
+        else:
+            rows = [torch.cat([e, around(spans[k + 1])]) for k in range(steps)]
+        x = torch.stack(rows)
+        if self.step is not None:
+            x = x + self.step(torch.arange(steps, device=d.device))
         return self.net(self.norm(x))
 
 
@@ -331,10 +343,11 @@ def chain_extras(step_head, ex: dict, doc: torch.Tensor, end: torch.Tensor, tag_
     if step_head is None or ex["type"] not in ("number", "date"):
         return out
     for bias in BIASES:
-        spans = tuple(decode(tag_logits, bias))
-        if spans not in out:
-            logits = step_head(doc, end, list(spans))
-            out[spans] = None if logits is None else logits.float().cpu()
+        raw = decode(tag_logits, bias)
+        for spans in (tuple(raw), tuple(snap_spans(ex, raw))):  # as decoded, and snapped
+            if spans not in out:
+                logits = step_head(doc, end, list(spans))
+                out[spans] = None if logits is None else logits.float().cpu()
     return out
 
 
@@ -470,8 +483,32 @@ def choose_op(ex: dict, op_logits: torch.Tensor | None) -> str:
     return max(allowed, key=lambda op: float(op_logits[OPS.index(op)]))
 
 
-def final_answer(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float, extra: dict | None = None):
+SNAP_TYPES = ("number", "date", "duration")
+
+
+def snap_spans(ex: dict, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Token spans widened to whole numbers and dates (`values.snap_char_spans`)."""
+    from experiments.values import snap_char_spans
+
+    if not spans or ex["type"] not in SNAP_TYPES:
+        return spans
+    offsets = ex["doc_offsets"]
+    chars = [(max(offsets[a][0], 0), offsets[b][1]) for a, b in spans]
+    out = []
+    for start, end in snap_char_spans(ex["text"], chars, ex["type"]):
+        token_span = span_to_tokens(offsets, start, end)
+        if token_span not in out:
+            out.append(token_span)
+    return out
+
+
+def final_answer(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float, extra: dict | None = None,
+                 snap: bool = False, rewriter=None):
+    """`snap`: widen marks to whole numbers and dates. `rewriter(text, kind)`: reads a part
+    the rules cannot (experiment 7: plain Gemma plus a backwards check)."""
     spans = decode(tag_logits, bias)
+    if snap:
+        spans = snap_spans(ex, spans)
     op = choose_op(ex, op_logits)
     read = None
     emitted = None
@@ -491,8 +528,11 @@ def final_answer(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float, ext
             return value
 
         emitted = extra.get("emit", {}).get(tuple(spans))
-    predicted = answer(op, span_texts(ex["text"], ex["doc_offsets"], spans), ex["spec"], read=read, emitted=emitted,
-                       blocks=blocks, rates=rates)
+    parts_text = span_texts(ex["text"], ex["doc_offsets"], spans)
+    if rewriter is not None:
+        def read(index, kind):
+            return rewriter(parts_text[index], kind)
+    predicted = answer(op, parts_text, ex["spec"], read=read, emitted=emitted, blocks=blocks, rates=rates)
     if blocks is not None:
         predicted["blocks"] = blocks
     return spans, op, predicted
@@ -552,7 +592,8 @@ def selective(confidences: list[float], right: list[bool]) -> dict:
     return {"thresholds": rows, "auroc": auroc, "fields": len(right)}
 
 
-def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0, extras=None) -> dict:
+def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0, extras=None,
+                 snap: bool = False, rewriter=None) -> dict:
     from collections import Counter, defaultdict
 
     hits, by_op = Counter(), defaultdict(Counter)
@@ -564,7 +605,7 @@ def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0, 
     confidences, rights = [], []
     for index, ex in enumerate(examples):
         extra = extras[index] if extras is not None else None
-        spans, op, predicted = final_answer(ex, tag_logits[index], op_logits[index], bias, extra)
+        spans, op, predicted = final_answer(ex, tag_logits[index], op_logits[index], bias, extra, snap, rewriter)
         ok = matches(ex["spec"], predicted)
         if ex["op"] == "emit" and ex["type"] == "number":
             emit_total += 1
@@ -611,11 +652,11 @@ def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0, 
     return out
 
 
-def pick_bias_by_value(examples, tag_logits, op_logits, extras=None) -> tuple[float, dict]:
+def pick_bias_by_value(examples, tag_logits, op_logits, extras=None, snap: bool = False) -> tuple[float, dict]:
     table = {}
     for b in BIASES:
         table[b] = (
-            value_report(examples, tag_logits, op_logits, b, extras=extras)["exact"],
+            value_report(examples, tag_logits, op_logits, b, extras=extras, snap=snap)["exact"],
             score_logits(examples, tag_logits, b)["exact"],
         )
     best = max(BIASES, key=lambda b: (table[b], -abs(b)))
@@ -712,6 +753,8 @@ def train_lora(
     op_head: OpHead | None = None,
     readers: dict | None = None,
     step_head: StepHead | None = None,
+    snap: bool = False,
+    rewriter=None,
     log=print,
 ) -> dict:
     """Train adapters, tagger and operation head together.
@@ -790,7 +833,7 @@ def train_lora(
                 log(f"  lora epoch {epoch} forward {number}/{len(fit_groups)} loss {total / max(seen, 1):.4f}")
         set_train(False)
         tag_l, op_l, ex_l = lora_logits(forward, head, op_head, parts["held"], layers, autocast, readers, step_head)
-        bias, table = pick_bias_by_value(parts["held"], tag_l, op_l, ex_l)
+        bias, table = pick_bias_by_value(parts["held"], tag_l, op_l, ex_l, snap=snap)
         row = {"epoch": epoch, "train_loss": total / max(1, seen), "skipped": skipped,
                "bias": bias, "held_value_exact": table[bias][0], "held_span_exact": table[bias][1],
                "held_span_exact_at_0": table[0.0][1]}
@@ -810,11 +853,21 @@ def train_lora(
     best["head"] = best["heads"][0]
     set_train(False)
     result = {"epoch": best["epoch"], "bias": best["bias"], "history": history, "values": {}}
+    if snap or rewriter is not None:
+        # The same logits scored without the new steps, so each one's effect is measured alone.
+        result["values_plain"] = {}
+        if rewriter is not None:
+            result["values_no_rewrite"] = {}
 
     def both(name, examples, keep):
         tag_l, op_l, ex_l = lora_logits(forward, head, op_head, examples, layers, autocast, readers, step_head)
         result[name] = report_part(examples, tag_l, best["bias"], keep_examples=keep)
-        result["values"][name] = value_report(examples, tag_l, op_l, best["bias"], keep_examples=keep, extras=ex_l)
+        result["values"][name] = value_report(examples, tag_l, op_l, best["bias"], keep_examples=keep, extras=ex_l,
+                                              snap=snap, rewriter=rewriter)
+        if "values_plain" in result:
+            result["values_plain"][name] = value_report(examples, tag_l, op_l, best["bias"], extras=ex_l)
+        if "values_no_rewrite" in result:
+            result["values_no_rewrite"][name] = value_report(examples, tag_l, op_l, best["bias"], extras=ex_l, snap=snap)
 
     both("held", parts["held"], 0)
     both("fit_sample", parts["fit"][:300], 0)
@@ -907,6 +960,24 @@ def summarize(payload: dict) -> str:
                     x, y = merged.get(op, (0, 0))
                     merged[op] = (x + a, y + b)
             lines.append(f"- {name}: " + ", ".join(f"{op} {a}/{b}" for op, (a, b) in sorted(merged.items())))
+    ablated = {name: res for name, res in valued.items() if res.get("values_plain")}
+    if ablated:
+        lines += ["", "## Effect of snapping marks to whole numbers, and of the Gemma rewrite", "",
+                  "Same model and logits. Plain = marks as decoded, rules only. Snap = marks widened to whole "
+                  "numbers and dates. Full = snap plus plain Gemma rewriting parts the rules cannot read, checked backwards.", ""]
+        lines.append("| Condition | Part | Plain | Snap | Full |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for name, res in ablated.items():
+            for part in res["values_plain"]:
+                plain = res["values_plain"][part]
+                snapped = res.get("values_no_rewrite", {}).get(part, res["values"][part])
+                full = res["values"][part]
+                lines.append(f"| {name} | {part} | {plain['exact']}/{plain['fields']} | {snapped['exact']}/{snapped['fields']} | "
+                             f"{full['exact']}/{full['fields']} |")
+        rw = payload.get("rewrite_stats")
+        if rw:
+            lines += ["", f"Gemma rewrite: asked {rw.get('asked', 0)}, gave a well-formed value {rw.get('parsed', 0)}, "
+                          f"passed the backwards check {rw.get('accepted', 0)}."]
     confident = {name: res for name, res in valued.items() if "confidence" in res["values"].get("exam1", {})}
     if confident:
         lines += ["", "## Confidence, exams 1-3", "",

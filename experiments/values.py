@@ -18,6 +18,7 @@ that case.
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -114,6 +115,50 @@ def run_chain(blocks: list[str], values: list, rates: list[bool] | None = None):
         acc = apply_block(block, acc, x, acc_rate, x_rate)
         acc_rate = False  # a computed value is never a rate
     return acc
+
+
+# ---- snapping marks to whole numbers and dates ----------------------------------
+
+_NUMBER = re.compile(r"\d+(?:,\d+)*(?:\.\d+)?")
+_MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+_DATES = [
+    re.compile(r"\d{4}-\d{2}-\d{2}"),
+    re.compile(r"\d{4}/\d{2}/\d{2}"),
+    re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}"),
+    re.compile(r"\d{1,2}(?:st|nd|rd|th)?\s+" + _MONTH + r",?\s+\d{4}", re.I),
+    re.compile(_MONTH + r"\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}", re.I),
+]
+
+
+def snap_char_spans(text: str, spans: list[tuple[int, int]], kind: str) -> list[tuple[int, int]]:
+    """Widen each marked character span to the whole number or date it touches.
+
+    A number is atomic: if any piece of "3,720.78" is marked, the answer needs
+    all of it. For dates (and date-or-count parts), a whole date expression is
+    taken first. Spans that come to overlap are merged. Spans with no digits
+    (names, words) are unchanged.
+    """
+    matches = [(m.span(), False) for p in _DATES for m in p.finditer(text)] if kind in ("date", "duration") else []
+    matches += [(m.span(), True) for m in _NUMBER.finditer(text)]
+    out = []
+    for start, end in spans:
+        changed = True
+        while changed:
+            changed = False
+            for (a, b), needs_digit in matches:
+                if a < end and b > start and (a < start or b > end):
+                    # A number is widened only when the mark touches one of its digits;
+                    # a date also when the mark touches its month name.
+                    if not needs_digit or any(ch.isdigit() for ch in text[max(a, start) : min(b, end)]):
+                        start, end, changed = min(a, start), max(b, end), True
+        out.append((start, end))
+    merged = []
+    for start, end in sorted(out):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def span_texts(text: str, doc_offsets: list[tuple[int, int]], spans: list[tuple[int, int]]) -> list[str]:
@@ -243,20 +288,28 @@ def _format(op: str, values: list, field: dict):
     raise ValueError(op)
 
 
-def _chain_answer(parts: list[str], field: dict, blocks, rates):
+def _chain_answer(parts: list[str], field: dict, blocks, rates, read=None):
     if blocks is None:
         return {"missing": False, "value": None}
     dayfirst = field.get("dayfirst", True)
     values = []
     try:
-        for part in parts:
+        for index, part in enumerate(parts):
             if field["type"] == "date":
                 try:
                     values.append(parse_date(part, dayfirst))
                     continue
                 except Drop:
                     pass
-            values.append(plain_number(part))
+            try:
+                values.append(plain_number(part))
+            except Drop:
+                # The rules cannot read it (words, an odd format): ask the reader, if any.
+                kind = "number" if field["type"] != "date" else ("date" if _looks_like_date(part) else "count")
+                value = read(index, kind) if read is not None else None
+                if value is None:
+                    return {"missing": False, "value": None}
+                values.append(value)
         result = run_chain(list(blocks), values, rates)
     except (Drop, ValueError, ArithmeticError, TypeError):
         return {"missing": False, "value": None}
@@ -284,7 +337,7 @@ def answer(op: str, parts: list[str], field: dict, read=None, emitted=None, bloc
     if op == "emit":
         return {"missing": False, "value": emitted}
     if op == "chain":
-        return _chain_answer(parts, field, blocks, rates)
+        return _chain_answer(parts, field, blocks, rates, read)
     if op not in NUMBER_OPS + DATE_OPS + ("add_days", "average"):
         try:
             return {"missing": False, "value": execute(op, parts, field)}
