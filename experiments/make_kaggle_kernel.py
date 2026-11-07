@@ -23,7 +23,7 @@ JOBS = {
     # job name: (kernel id, title, module, function that runs)
     "question_order": ("ommnaidu/gemma-e2b-question-order", "Gemma E2B question order", "experiments.kaggle_job", "main"),
     "lora": ("ommnaidu/gemma-e2b-lora-evidence", "Gemma E2B LoRA evidence", "experiments.kaggle_lora_job", "main"),
-    "lora_onepass": ("ommnaidu/gemma-e2b-lora-onepass", "Gemma E2B LoRA one pass", "experiments.kaggle_lora_job", "main_onepass"),
+    "lora_onepass": ("ommnaidu/gemma-e2b-lora-onepass", "Gemma E2B LoRA onepass", "experiments.kaggle_lora_job", "main_onepass"),
     # The final grade. The only job whose bundle contains exam 4. Needs the
     # trained model's kernel as a source: make_kaggle_kernel.py OUT final SOURCE_KERNEL
     "final": ("ommnaidu/gemma-e2b-final-grade", "Gemma E2B final grade", "experiments.kaggle_final_job", "main"),

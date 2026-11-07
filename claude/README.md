@@ -15,9 +15,11 @@ The older notes are still true for their era and are worth reading after this: `
 | Does putting the question before the note help a *frozen* Gemma? | Barely. Fewer decoy picks, more misses, no net gain. | [05](05-experiment-1-question-order.md) |
 | Does letting Gemma learn (LoRA) help? | Yes, by a lot. Evidence exactly right on never-seen exams went from 116/293 (40%) to 195/293 (67%). | [06](06-experiment-2-lora.md) |
 | Is the LoRA model memorizing? | No sign of it. It fits training notes slightly worse than the frozen tagger (273/300 vs 300/300) and new notes much better. | [06](06-experiment-2-lora.md) |
-| Final answers (the actual fee, the actual due date)? | Running when these notes were written (Kaggle kernel version 3). | [07](07-experiment-3-final-answers.md) |
+| Final answers (the actual fee, the actual due date)? | **226/293 (77%) on exams 1–3**, against 139/293 for the marking test with its hand rules. Operation choice 102/103. | [07](07-experiment-3-final-answers.md) |
+| All fields in one pass, and confidence scores? | Running (kernel `ommnaidu/gemma-e2b-lora-onepass`). | [12](12-one-pass-confidence-and-real-receipts.md) |
+| Real documents? | SROIE test receipts, zero-shot, prepared; scored together with exam 4 in the final grade. | [12](12-one-pass-confidence-and-real-receipts.md) |
 | Exam 4? | Not touched. It is kept for one final grade. | [10](10-next-steps.md) |
-| Real customer mail? | None on disk. Every number here is on synthetic notes. | [09](09-blog-draft.md) |
+| Real customer mail? | None on disk. SROIE receipts are the real-document test. | [09](09-blog-draft.md) |
 
 ## Reading order
 
@@ -32,6 +34,7 @@ The older notes are still true for their era and are worth reading after this: `
 9. [09 — Blog draft and claims](09-blog-draft.md): the story, the figures, what may and may not be said.
 10. [10 — Next steps and open questions](10-next-steps.md)
 11. [11 — Decision log](11-decision-log.md): every decision in order, including the wrong turns.
+12. [12 — One pass, confidence, and real receipts](12-one-pass-confidence-and-real-receipts.md)
 
 ## Ground rules that still hold
 
