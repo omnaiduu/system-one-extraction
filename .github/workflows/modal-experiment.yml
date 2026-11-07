@@ -2,7 +2,7 @@ name: modal-experiment
 
 # Runs the question-order experiment on a Modal GPU and commits the result
 # files back to the branch. The budget is small, so a push only spends GPU
-# time when its commit message contains [run]. Every push still runs the
+# time when its commit message starts with [run]. Every push still runs the
 # tests. Re-running a past run from the Actions tab also works.
 
 on:
@@ -33,7 +33,7 @@ jobs:
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       PROMPTS: ${{ github.event.inputs.prompts || 'last_nobos,last,first' }}
-      GPU_RUN: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run]') }}
+      GPU_RUN: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, '[run]') }}
     steps:
       - uses: actions/checkout@v4
 
