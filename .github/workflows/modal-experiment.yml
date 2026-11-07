@@ -60,7 +60,12 @@ jobs:
 
       - name: Run on Modal
         if: env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != ''
-        run: modal run experiments/modal_app.py --prompts "$PROMPTS"
+        run: |
+          # Pasted secrets often carry a trailing newline, which Modal rejects.
+          export MODAL_TOKEN_ID="$(printf '%s' "$MODAL_TOKEN_ID" | tr -d '[:space:]')"
+          export MODAL_TOKEN_SECRET="$(printf '%s' "$MODAL_TOKEN_SECRET" | tr -d '[:space:]')"
+          export HF_TOKEN="$(printf '%s' "$HF_TOKEN" | tr -d '[:space:]')"
+          modal run experiments/modal_app.py --prompts "$PROMPTS"
 
       - name: Commit results
         if: env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != ''
