@@ -658,7 +658,10 @@ def train_lora(
                         op_logits = op_head(question, end)
                         loss = loss + F.cross_entropy(op_logits.float(), torch.tensor([ex["op_index"]], device=device))
                     if readers is not None:
-                        loss = loss + _reader_losses(readers, ex, doc[0], end[0])
+                        # Detached: the readers learn from Gemma's states but do not
+                        # push back into the adapters. Joint training let the reader
+                        # losses (about 100x the tagger's) take the adapters over.
+                        loss = loss + _reader_losses(readers, ex, doc[0].detach(), end[0].detach())
                     losses.append(loss)
             loss = torch.stack(losses).sum()
             if not torch.isfinite(loss):

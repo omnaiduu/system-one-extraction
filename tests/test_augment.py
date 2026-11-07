@@ -164,3 +164,19 @@ def test_emit_training_runs_end_to_end(rows):
     assert "/" in result["values"]["dev_emit"]["emit_number_within_1pct"]
     text = lora_tagger.summarize({"model": "fake", "results": {"emit": result}})
     assert "Augmented dev notes" in text
+
+
+def test_reader_losses_do_not_reach_the_adapters(rows):
+    from tests.test_lora import FakeTokenizer, FakeTower
+
+    picked = augment.augment([r for r in rows if r["split"] == "train"][:4], seed=11)
+    examples = lora_tagger.encode(picked, FakeTokenizer(), "multi")
+    ex = next(e for e in examples if e["op"] == "emit")
+    tower = FakeTower()
+    readers = lora_tagger.make_readers(2, 16)
+    stacked = lora_tagger._stack(tower, ex["ids"], [1, 2])
+    doc, question, end = lora_tagger._field_states(stacked, ex)
+    loss = lora_tagger._reader_losses(readers, ex, doc[0].detach(), end[0].detach())
+    loss.backward()
+    assert tower.adapter.grad is None
+    assert any(p.grad is not None for p in readers["emit_number"].parameters()) or ex["type"] == "date"
