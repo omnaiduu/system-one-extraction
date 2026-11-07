@@ -74,7 +74,40 @@ def _field_example(row, question, ids, offsets, doc_index, doc_start, q_span, gr
         "text": row["text"],
         "doc_offsets": doc_offsets,
         "spec": row["fields"][question["field"]],
+        "span_targets": span_targets(row, row["fields"][question["field"]]),
     }
+
+
+def span_targets(row: dict, field: dict) -> list:
+    """For each gold span (text order): ("number", Decimal), ("date", date), or None.
+
+    Augmented rows carry the values (their spans may be words); original rows
+    are read from the digits.
+    """
+    from datetime import date as _date
+    from decimal import Decimal as _Decimal
+
+    from experiments.augment import span_kinds, span_value
+    from experiments.evidence_data import field_evidence
+
+    spans = field_evidence(field) or []
+    kinds = field.get("span_kinds") or span_kinds(field)
+    stored = field.get("span_values")
+    out = []
+    for index, ((a, b), kind) in enumerate(zip(spans, kinds)):
+        if stored is not None:
+            raw = stored[index]
+            if raw is None or kind is None:
+                out.append(None)
+                continue
+            value = _date.fromisoformat(raw) if "-" in raw and kind != "number" else _Decimal(raw)
+        else:
+            value = span_value(row["text"][a:b], kind, field.get("dayfirst", True))
+        if value is None:
+            out.append(None)
+        else:
+            out.append(("date", value) if isinstance(value, _date) else ("number", value))
+    return out
 
 
 def encode(rows: list[dict], tokenizer, prompt: str) -> list[dict]:
@@ -115,14 +148,17 @@ def groups_of(examples: list[dict]) -> list[list[int]]:
 
 
 def assign_parts(examples: list[dict]) -> dict[str, list[dict]]:
-    train_docs = [ex["doc"] for ex in examples if ex["split"] == "train"]
+    """fit / held by the source note (a note and its variants stay together); dev parts by split."""
+    from experiments.augment import base_id
+
+    train_docs = [base_id(ex["doc"]) for ex in examples if ex["split"] == "train"]
     fold_of = folds_for(train_docs)
     parts = {"fit": [], "held": [], **{name: [] for name in DEV}}
     for ex in examples:
         if ex["split"] == "train":
-            parts["held" if fold_of[ex["doc"]] == 0 else "fit"].append(ex)
-        elif ex["split"] in DEV:
-            parts[ex["split"]].append(ex)
+            parts["held" if fold_of[base_id(ex["doc"])] == 0 else "fit"].append(ex)
+        else:
+            parts.setdefault(ex["split"], []).append(ex)
     return parts
 
 
@@ -240,17 +276,155 @@ class OpHead(torch.nn.Module):
         return self.net(self.norm(torch.cat([q, e], dim=-1)))
 
 
+# ---- learned reader and emit heads ---------------------------------------------
+
+YEAR0, YEARS = 2010, 30
+NUMBER_OUTPUTS = [2] + [10] * 7 + [10] * 2  # sign, 7 whole digits, 2 decimals
+DATE_OUTPUTS = [YEARS, 12, 31]  # year from 2010, month, day
+
+
+class SpanReader(torch.nn.Module):
+    """Read a value off marked tokens, keeping their order.
+
+    One learned query per output slot (each digit, or year / month / day)
+    attends over the marked tokens' states, plus the question. This is the
+    number and calendar heads again, but they read the marked words, not a
+    blend of the whole note.
+    """
+
+    def __init__(self, layers: int, width: int, outputs: list[int], inner: int = 256, max_len: int = 48) -> None:
+        super().__init__()
+        self.mix = torch.nn.Parameter(torch.zeros(layers))
+        self.norm = torch.nn.LayerNorm(width)
+        self.proj = torch.nn.Linear(width, inner)
+        self.q_proj = torch.nn.Linear(width, inner)
+        self.pos = torch.nn.Embedding(max_len, inner)
+        self.queries = torch.nn.Parameter(torch.randn(len(outputs), inner) * 0.02)
+        self.attn = torch.nn.MultiheadAttention(inner, 4, batch_first=True)
+        self.mlp = torch.nn.Sequential(torch.nn.LayerNorm(inner), torch.nn.Linear(inner, inner), torch.nn.GELU())
+        self.heads = torch.nn.ModuleList(torch.nn.Linear(inner, n) for n in outputs)
+        self.max_len = max_len
+
+    def forward(self, tokens: torch.Tensor, question: torch.Tensor) -> list[torch.Tensor]:
+        """tokens [K, L, H], question [K, H] -> one logit vector per output slot."""
+        weights = torch.softmax(self.mix, 0)
+        tokens = tokens[:, : self.max_len]
+        t = torch.einsum("k,klh->lh", weights, F.layer_norm(tokens, tokens.shape[-1:]))
+        t = self.proj(self.norm(t)) + self.pos(torch.arange(t.shape[0], device=t.device))
+        q = self.q_proj(self.norm(torch.einsum("k,kh->h", weights, F.layer_norm(question, question.shape[-1:]))))
+        queries = (self.queries + q).unsqueeze(0)
+        out, _ = self.attn(queries, t.unsqueeze(0), t.unsqueeze(0))
+        hidden = self.mlp(out + queries)[0]
+        return [head(hidden[i]) for i, head in enumerate(self.heads)]
+
+
+def make_readers(layers: int, width: int) -> dict:
+    return {
+        "number": SpanReader(layers, width, NUMBER_OUTPUTS),
+        "date": SpanReader(layers, width, DATE_OUTPUTS),
+        "emit_number": SpanReader(layers, width, NUMBER_OUTPUTS),
+        "emit_date": SpanReader(layers, width, DATE_OUTPUTS),
+    }
+
+
+def number_target(value) -> list[int] | None:
+    from extractor.labels import split_number
+
+    try:
+        encoded = split_number(float(value), 2)
+    except ValueError:
+        return None
+    return [encoded["sign"]] + encoded["whole"] + encoded["frac"]
+
+
+def date_target(value) -> list[int] | None:
+    if not YEAR0 <= value.year < YEAR0 + YEARS:
+        return None
+    return [value.year - YEAR0, value.month - 1, value.day - 1]
+
+
+def reader_loss(reader: SpanReader, tokens, question, target: list[int]) -> torch.Tensor:
+    logits = reader(tokens, question)
+    device = logits[0].device
+    return sum(F.cross_entropy(l.float().unsqueeze(0), torch.tensor([t], device=device)) for l, t in zip(logits, target))
+
+
+def read_number(reader: SpanReader, tokens, question):
+    from decimal import Decimal as _Decimal
+
+    choice = [int(l.argmax()) for l in reader(tokens, question)]
+    sign, whole, frac = choice[0], choice[1:8], choice[8:10]
+    text = ("".join(map(str, whole)).lstrip("0") or "0") + "." + "".join(map(str, frac))
+    value = _Decimal(text)
+    return -value if sign == 1 else value
+
+
+def read_date(reader: SpanReader, tokens, question):
+    from datetime import date as _date
+
+    year, month, day = (int(l.argmax()) for l in reader(tokens, question))
+    try:
+        return _date(YEAR0 + year, month + 1, day + 1)
+    except ValueError:
+        return None
+
+
+def _span_tokens(doc: torch.Tensor, spans) -> torch.Tensor:
+    """doc [K, T, H]; the marked tokens of all spans, in order -> [K, L, H]."""
+    return torch.cat([doc[:, a : b + 1] for a, b in spans], dim=1)
+
+
+def reader_extras(readers: dict, ex: dict, doc: torch.Tensor, question: torch.Tensor, tag_logits: torch.Tensor) -> dict:
+    """Reader and emit outputs for every span set any candidate bias could decode."""
+    extra = {"number": {}, "date": {}, "emit": {}}
+    if readers is None or ex["type"] not in ("number", "date", "duration"):
+        return extra
+    for bias in BIASES:
+        spans = decode(tag_logits, bias)
+        if not spans:
+            continue
+        for span in spans:
+            if span not in extra["number"]:
+                tokens = _span_tokens(doc, [span])
+                extra["number"][span] = read_number(readers["number"], tokens, question)
+                extra["date"][span] = read_date(readers["date"], tokens, question)
+        key = tuple(spans)
+        if key not in extra["emit"]:
+            tokens = _span_tokens(doc, spans)
+            if ex["type"] == "date":
+                d = read_date(readers["emit_date"], tokens, question)
+                extra["emit"][key] = d.isoformat() if d is not None else None
+            else:
+                extra["emit"][key] = float(read_number(readers["emit_number"], tokens, question))
+    return extra
+
+
 def choose_op(ex: dict, op_logits: torch.Tensor | None) -> str:
     allowed = ALLOWED[ex["type"]]
+    if op_logits is not None:
+        allowed = tuple(op for op in allowed if OPS.index(op) < len(op_logits))
     if len(allowed) == 1 or op_logits is None:
         return allowed[0]
     return max(allowed, key=lambda op: float(op_logits[OPS.index(op)]))
 
 
-def final_answer(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float):
+def final_answer(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float, extra: dict | None = None):
     spans = decode(tag_logits, bias)
     op = choose_op(ex, op_logits)
-    predicted = answer(op, span_texts(ex["text"], ex["doc_offsets"], spans), ex["spec"])
+    read = None
+    emitted = None
+    if extra is not None:
+        def read(index, kind):
+            span = spans[index]
+            if kind == "date":
+                return extra["date"].get(span)
+            value = extra["number"].get(span)
+            if kind == "count" and value is not None:
+                return int(value)
+            return value
+
+        emitted = extra["emit"].get(tuple(spans))
+    predicted = answer(op, span_texts(ex["text"], ex["doc_offsets"], spans), ex["spec"], read=read, emitted=emitted)
     return spans, op, predicted
 
 
@@ -299,16 +473,23 @@ def selective(confidences: list[float], right: list[bool]) -> dict:
     return {"thresholds": rows, "auroc": auroc, "fields": len(right)}
 
 
-def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0) -> dict:
+def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0, extras=None) -> dict:
     from collections import Counter, defaultdict
 
     hits, by_op = Counter(), defaultdict(Counter)
     op_right = op_total = 0
+    emit_close = emit_total = 0
     kept = []
     confidences, rights = [], []
     for index, ex in enumerate(examples):
-        spans, op, predicted = final_answer(ex, tag_logits[index], op_logits[index], bias)
+        extra = extras[index] if extras is not None else None
+        spans, op, predicted = final_answer(ex, tag_logits[index], op_logits[index], bias, extra)
         ok = matches(ex["spec"], predicted)
+        if ex["op"] == "emit" and ex["type"] == "number":
+            emit_total += 1
+            gold, got = ex["spec"]["value"], predicted["value"]
+            if isinstance(got, (int, float)) and gold and abs(got - gold) <= 0.01 * abs(gold):
+                emit_close += 1
         conf = field_confidence(ex, tag_logits[index], op_logits[index], bias, spans, op)
         confidences.append(conf["confidence"])
         rights.append(bool(ok))
@@ -327,6 +508,7 @@ def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0) 
         "exact": hits[True],
         "by_op": {op: f"{c[True]}/{c[True] + c[False]}" for op, c in sorted(by_op.items())},
         "op_choice": f"{op_right}/{op_total}",
+        "emit_number_within_1pct": f"{emit_close}/{emit_total}",
         "confidence": selective(confidences, rights),
     }
     if keep_examples:
@@ -334,11 +516,11 @@ def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0) 
     return out
 
 
-def pick_bias_by_value(examples, tag_logits, op_logits) -> tuple[float, dict]:
+def pick_bias_by_value(examples, tag_logits, op_logits, extras=None) -> tuple[float, dict]:
     table = {}
     for b in BIASES:
         table[b] = (
-            value_report(examples, tag_logits, op_logits, b)["exact"],
+            value_report(examples, tag_logits, op_logits, b, extras=extras)["exact"],
             score_logits(examples, tag_logits, b)["exact"],
         )
     best = max(BIASES, key=lambda b: (table[b], -abs(b)))
@@ -365,12 +547,14 @@ def _example_states(forward, ex: dict, layers: list[int]):
     return _field_states(_stack(forward, ex["ids"], layers), ex)
 
 
-def lora_logits(forward, head: Tagger, op_head, examples: list[dict], layers: list[int], autocast):
-    """Tag logits and operation logits for each example."""
+def lora_logits(forward, head: Tagger, op_head, examples: list[dict], layers: list[int], autocast, readers=None):
+    """Tag logits, operation logits, and reader/emit outputs for each example."""
     head.eval()
     if op_head is not None:
         op_head.eval()
-    tags, ops = [None] * len(examples), [None] * len(examples)
+    for reader in (readers or {}).values():
+        reader.eval()
+    tags, ops, extras = [None] * len(examples), [None] * len(examples), [None] * len(examples)
     with torch.no_grad():
         for group in groups_of(examples):
             with autocast():
@@ -381,7 +565,36 @@ def lora_logits(forward, head: Tagger, op_head, examples: list[dict], layers: li
                     op_logits = op_head(question, end) if op_head is not None else None
                     tags[index] = logits[0].float().cpu()
                     ops[index] = None if op_logits is None else op_logits[0].float().cpu()
-    return tags, ops
+                    if readers is not None:
+                        extras[index] = reader_extras(readers, examples[index], doc[0], end[0], tags[index])
+    return tags, ops, (extras if readers is not None else None)
+
+
+def _reader_losses(readers: dict, ex: dict, doc: torch.Tensor, question: torch.Tensor) -> torch.Tensor:
+    """Teach the reader on every gold span with a known value, and the emit head on emit fields."""
+    total = doc.new_zeros(())
+    for (a, b), target in zip(ex["gold"], ex.get("span_targets") or []):
+        if target is None:
+            continue
+        kind, value = target
+        tokens = doc[:, a : b + 1]
+        encoded = date_target(value) if kind == "date" else number_target(value)
+        if encoded is not None:
+            total = total + reader_loss(readers["date" if kind == "date" else "number"], tokens, question, encoded)
+    if ex["op"] == "emit" and ex["gold"]:
+        from datetime import date as _date
+
+        tokens = _span_tokens(doc, ex["gold"])
+        value = ex["spec"]["value"]
+        if ex["type"] == "date":
+            encoded = date_target(_date.fromisoformat(value))
+            if encoded is not None:
+                total = total + reader_loss(readers["emit_date"], tokens, question, encoded)
+        else:
+            encoded = number_target(value)
+            if encoded is not None:
+                total = total + reader_loss(readers["emit_number"], tokens, question, encoded)
+    return total
 
 
 def train_lora(
@@ -398,6 +611,7 @@ def train_lora(
     use_amp: bool = True,
     set_train=lambda flag: None,
     op_head: OpHead | None = None,
+    readers: dict | None = None,
     log=print,
 ) -> dict:
     """Train adapters, tagger and operation head together.
@@ -407,7 +621,7 @@ def train_lora(
     """
     rng = random.Random(SEED)
     torch.manual_seed(SEED)
-    heads = [head] + ([op_head] if op_head is not None else [])
+    heads = [head] + ([op_head] if op_head is not None else []) + list((readers or {}).values())
     head_params = [p for h in heads for p in h.parameters()]
     optimizer = torch.optim.AdamW(
         [{"params": adapter_params, "lr": lr_adapter}, {"params": head_params, "lr": lr_head}],
@@ -443,6 +657,8 @@ def train_lora(
                     if op_head is not None and ex.get("op_index", -1) >= 0:
                         op_logits = op_head(question, end)
                         loss = loss + F.cross_entropy(op_logits.float(), torch.tensor([ex["op_index"]], device=device))
+                    if readers is not None:
+                        loss = loss + _reader_losses(readers, ex, doc[0], end[0])
                     losses.append(loss)
             loss = torch.stack(losses).sum()
             if not torch.isfinite(loss):
@@ -462,8 +678,8 @@ def train_lora(
             if number % 100 == 0:
                 log(f"  lora epoch {epoch} forward {number}/{len(fit_groups)} loss {total / max(seen, 1):.4f}")
         set_train(False)
-        tag_l, op_l = lora_logits(forward, head, op_head, parts["held"], layers, autocast)
-        bias, table = pick_bias_by_value(parts["held"], tag_l, op_l)
+        tag_l, op_l, ex_l = lora_logits(forward, head, op_head, parts["held"], layers, autocast, readers)
+        bias, table = pick_bias_by_value(parts["held"], tag_l, op_l, ex_l)
         row = {"epoch": epoch, "train_loss": total / max(1, seen), "skipped": skipped,
                "bias": bias, "held_value_exact": table[bias][0], "held_span_exact": table[bias][1],
                "held_span_exact_at_0": table[0.0][1]}
@@ -485,14 +701,15 @@ def train_lora(
     result = {"epoch": best["epoch"], "bias": best["bias"], "history": history, "values": {}}
 
     def both(name, examples, keep):
-        tag_l, op_l = lora_logits(forward, head, op_head, examples, layers, autocast)
+        tag_l, op_l, ex_l = lora_logits(forward, head, op_head, examples, layers, autocast, readers)
         result[name] = report_part(examples, tag_l, best["bias"], keep_examples=keep)
-        result["values"][name] = value_report(examples, tag_l, op_l, best["bias"], keep_examples=keep)
+        result["values"][name] = value_report(examples, tag_l, op_l, best["bias"], keep_examples=keep, extras=ex_l)
 
     both("held", parts["held"], 0)
     both("fit_sample", parts["fit"][:300], 0)
-    for name in DEV:
-        both(name, parts[name], 200)
+    for name in list(DEV) + sorted(k for k in parts if k not in DEV and k not in ("fit", "held")):
+        if parts.get(name):
+            both(name, parts[name], 200)
     result["_best"] = best
     return result
 
@@ -537,6 +754,16 @@ def summarize(payload: dict) -> str:
                 + " | ".join(f"{v[d]['exact']}/{v[d]['fields']}" for d in DEV)
                 + f" | {right}/{total} | {op_r}/{op_t} |"
             )
+        extra_parts = sorted({k for res in valued.values() for k in res["values"] if k not in DEV + ("held", "fit_sample")})
+        if extra_parts:
+            lines += ["", "### Augmented dev notes (exams 1-3 rewritten; emit phrasings never used in training)", ""]
+            lines.append("| Condition | Part | Final answers | By operation | Emit numbers within 1% |")
+            lines.append("| --- | --- | --- | --- | --- |")
+            for name, res in valued.items():
+                for part in extra_parts:
+                    v = res["values"].get(part)
+                    if v:
+                        lines.append(f"| {name} | {part} | {v['exact']}/{v['fields']} | {v['by_op']} | {v.get('emit_number_within_1pct', '-')} |")
         lines += ["", "Final answers by operation, exams 1-3:", ""]
         for name, res in valued.items():
             merged = {}

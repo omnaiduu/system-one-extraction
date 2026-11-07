@@ -207,7 +207,7 @@ def load_split(root: Path) -> tuple[list[dict], dict]:
     return rows, skipped
 
 
-def score(examples: list[dict], tag_logits, op_logits, bias: float) -> dict:
+def score(examples: list[dict], tag_logits, op_logits, bias: float, extras=None) -> dict:
     """found / value / value_wide_dates, per field and overall."""
     from experiments.lora_tagger import field_confidence, final_answer, selective
     from experiments.values import matches, span_texts
@@ -215,7 +215,8 @@ def score(examples: list[dict], tag_logits, op_logits, bias: float) -> dict:
     per = {name: {"fields": 0, "found": 0, "value": 0, "value_wide_dates": 0} for name in FIELDS}
     confidences, rights, kept = [], [], []
     for index, ex in enumerate(examples):
-        spans, op, predicted = final_answer(ex, tag_logits[index], op_logits[index], bias)
+        extra = extras[index] if extras is not None else None
+        spans, op, predicted = final_answer(ex, tag_logits[index], op_logits[index], bias, extra)
         parts = span_texts(ex["text"], ex["doc_offsets"], spans)
         spec = ex["spec"]
         gold_slice = ex["text"][spec["start"] : spec["end"]].strip()

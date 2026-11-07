@@ -18,21 +18,22 @@ that case.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from extractor.audit import Drop, parse_date, parse_datetime, parse_number, parse_time, quantize
 
 OPS = (
     "copy", "list", "read_number", "read_date", "read_time", "read_datetime",
-    "sum", "subtract", "product", "add_days", "days_between", "median",
+    "sum", "subtract", "product", "add_days", "days_between", "median", "emit",
 )
+# "emit": no listed operation fits, so the emit head writes the value itself.
 ALLOWED = {
     "text": ("copy",),
     "list": ("list",),
-    "number": ("read_number", "sum", "subtract", "product"),
+    "number": ("read_number", "sum", "subtract", "product", "emit"),
     "duration": ("days_between",),
-    "date": ("read_date", "add_days"),
+    "date": ("read_date", "add_days", "emit"),
     "time": ("read_time",),
     "datetime": ("read_datetime",),
     "estimate": ("median",),
@@ -99,13 +100,117 @@ def execute(op: str, parts: list[str], field: dict):
     raise ValueError(op)
 
 
-def answer(op: str, parts: list[str], field: dict):
-    """Missing when nothing is marked; None when the parts cannot be read."""
+NUMBER_OPS = ("read_number", "sum", "subtract", "product", "median")
+# Words that may sit next to a plain amount ("RM 32.80", "Rs 500 only").
+AMOUNT_WORDS = {"rs", "rm", "usd", "inr", "eur", "gbp", "sgd", "aud", "cad", "myr", "only"}
+MONTH_WORDS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+
+
+def plain_number(part: str):
+    """parse_number, but refuse text with real words in it.
+
+    The auditor's parse_number strips leading letters, so "April the second,
+    2026" would read as 2026. Text with words goes to the learned reader.
+    """
+    import re
+
+    def is_word(w: str) -> bool:
+        # A currency code ("CFA", "MWK", "RM") is short and in capitals; number
+        # words ("one thousand", "April the second") are not.
+        return len(w) >= 3 and w.lower() not in AMOUNT_WORDS and not (w.isupper() and len(w) <= 3)
+
+    if any(is_word(w) for w in re.findall(r"[A-Za-z]+", part)):
+        raise Drop(f"words_in_number:{part}")
+    return parse_number(part)
+
+
+def _looks_like_date(part: str) -> bool:
+    lowered = part.lower()
+    return any(m in lowered for m in MONTH_WORDS) or bool(__import__("re").search(r"\d{4}", part))
+DATE_OPS = ("read_date", "days_between")
+
+
+def _format(op: str, values: list, field: dict):
+    """The answer from already-read parts (Decimal amounts, dates)."""
+    decimals = int(field.get("decimals", 2))
+    q = lambda v: float(quantize(v, decimals))
+    if op == "read_number":
+        return q(values[0]) if len(values) == 1 else None
+    if op == "read_date":
+        return values[0].isoformat() if len(values) == 1 else None
+    if op == "sum":
+        return q(sum(values, Decimal(0))) if len(values) >= 2 else None
+    if op == "product":
+        return q(values[0] * values[1]) if len(values) == 2 else None
+    if op == "subtract":
+        return q(values[0] - values[1]) if len(values) == 2 else None
+    if op == "median":
+        if len(values) < 2:
+            return None
+        ordered = sorted(values)
+        mid = len(ordered) // 2
+        middle = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / Decimal(2)
+        return float(quantize(middle, int(field.get("decimals") or 0)))
+    if op == "days_between":
+        if len(values) != 2:
+            return None
+        first, second = sorted(values)
+        return (second - first).days
+    if op == "add_days":
+        dates = [v for v in values if isinstance(v, date)]
+        counts = [v for v in values if not isinstance(v, date)]
+        if len(dates) != 1 or len(counts) != 1:
+            return None
+        return (dates[0] + timedelta(days=int(counts[0]))).isoformat()
+    raise ValueError(op)
+
+
+def answer(op: str, parts: list[str], field: dict, read=None, emitted=None):
+    """The final answer for one field.
+
+    Missing when nothing is marked. "emit" returns what the emit head wrote.
+    Otherwise each marked part is read by the parser; a part the parser
+    cannot read (a number or date in words) goes to `read(index, kind)`, the
+    learned reader, when one is given. None when a part stays unreadable.
+    """
     if not parts:
         return {"missing": True, "value": None}
+    if op == "emit":
+        return {"missing": False, "value": emitted}
+    if op not in NUMBER_OPS + DATE_OPS + ("add_days",):
+        try:
+            return {"missing": False, "value": execute(op, parts, field)}
+        except (Drop, ValueError, ArithmeticError):
+            return {"missing": False, "value": None}
+    dayfirst = field.get("dayfirst", True)
+    values = []
+    for index, part in enumerate(parts):
+        value = None
+        try:
+            if op in DATE_OPS:
+                value = parse_date(part, dayfirst)
+            elif op == "add_days":
+                try:
+                    value = parse_date(part, dayfirst)
+                except Drop:
+                    value = plain_number(part)
+            else:
+                value = plain_number(part)
+        except Drop:
+            if read is not None:
+                if op in DATE_OPS:
+                    kind = "date"
+                elif op == "add_days":
+                    kind = "date" if _looks_like_date(part) else "count"
+                else:
+                    kind = "number"
+                value = read(index, kind)
+        if value is None:
+            return {"missing": False, "value": None}
+        values.append(value)
     try:
-        return {"missing": False, "value": execute(op, parts, field)}
-    except (Drop, ValueError, ArithmeticError):
+        return {"missing": False, "value": _format(op, values, field)}
+    except (ValueError, ArithmeticError, TypeError):
         return {"missing": False, "value": None}
 
 

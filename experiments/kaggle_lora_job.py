@@ -63,14 +63,34 @@ def main_onepass() -> None:
     run_job(layout="multi", epochs=EPOCHS, prefix="lora_onepass", run_frozen=False)
 
 
-def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool) -> None:
+def main_emit() -> None:
+    """Experiment 5: one pass, plus the learned reader and the emit head, on augmented notes."""
+    run_job(layout="multi", epochs=EPOCHS, prefix="lora_emit", run_frozen=False, emit=True)
+
+
+def augmented_rows(rows: list[dict]) -> list[dict]:
+    """Training notes plus their words and emit variants (training phrasings);
+    exams 1-3 plus words and emit variants with phrasings never used in training,
+    as the dev parts dev_words and dev_emit."""
+    from experiments.augment import TEST_TEMPLATES, TRAIN_TEMPLATES, augment
+
+    train = [row for row in rows if row["split"] == "train"]
+    dev = [row for row in rows if row["split"] in ("exam1", "exam2", "exam3")]
+    out = list(rows)
+    out += augment(train, seed=11, templates=TRAIN_TEMPLATES)
+    for row in augment(dev, seed=23, templates=TEST_TEMPLATES):
+        out.append({**row, "split": f"dev_{row['augment']}"})
+    return out
+
+
+def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool = False) -> None:
     import torch
     import transformers
     from peft import LoraConfig, inject_adapter_in_model
 
     from experiments.evidence_data import load_rows
     from experiments.evidence_heads import Tagger
-    from experiments.lora_tagger import OpHead, assign_parts, encode, summarize, train_lora
+    from experiments.lora_tagger import OpHead, assign_parts, encode, make_readers, summarize, train_lora
     from experiments.lora_tagger import run_frozen as run_frozen_baselines  # not `run_frozen`: that name is the flag
 
     started = time.time()
@@ -92,6 +112,8 @@ def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool) -> None:
         return out.hidden_states
 
     rows = [row for row in load_rows() if row["split"] != "exam4"]
+    if emit:
+        rows = augmented_rows(rows)
     probe = tokenizer(rows[0]["text"], add_special_tokens=True)["input_ids"]
     with torch.no_grad():
         hidden = forward(probe)
@@ -142,16 +164,20 @@ def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool) -> None:
 
     head = Tagger(len(layers), hidden[0].shape[-1]).to(device)
     op_head = OpHead(len(layers), hidden[0].shape[-1]).to(device)
+    readers = None
+    if emit:
+        readers = {name: r.to(device) for name, r in make_readers(len(layers), hidden[0].shape[-1]).items()}
     t0 = time.time()
     result = train_lora(
         parts_by_prompt[layout], forward, adapter_params, head, layers, device,
-        epochs=epochs, set_train=lambda flag: model.train(flag), op_head=op_head, log=log,
+        epochs=epochs, set_train=lambda flag: model.train(flag), op_head=op_head, readers=readers, log=log,
     )
     best = result.pop("_best")
     result["seconds"] = round(time.time() - t0, 1)
     payload["results"][f"lora {layout}, {epochs} epochs"] = result
     torch.save({"adapter_names": [n for n, p in model.named_parameters() if "lora_" in n],
                 "adapter": best["adapter"], "head": best["head"], "op_head": best["heads"][1], "layers": layers,
+                "readers": dict(zip(readers, best["heads"][2:])) if readers else None,
                 "lora": payload["lora"], "bias": best["bias"], "layout": layout}, OUT / f"{prefix}_adapter.pt")
 
     payload["seconds"] = round(time.time() - started, 1)

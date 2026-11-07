@@ -1,6 +1,6 @@
 """Pack the experiment into one Kaggle kernel script.
 
-    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora|lora_onepass|final SOURCE_KERNEL]
+    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora|lora_onepass|lora_emit|final SOURCE_KERNEL]
     kaggle kernels push -p OUT_DIR
 
 The kernel script carries the raw writer files, `extractor/`, and
@@ -24,6 +24,7 @@ JOBS = {
     "question_order": ("ommnaidu/gemma-e2b-question-order", "Gemma E2B question order", "experiments.kaggle_job", "main"),
     "lora": ("ommnaidu/gemma-e2b-lora-evidence", "Gemma E2B LoRA evidence", "experiments.kaggle_lora_job", "main"),
     "lora_onepass": ("ommnaidu/gemma-e2b-lora-onepass", "Gemma E2B LoRA onepass", "experiments.kaggle_lora_job", "main_onepass"),
+    "lora_emit": ("ommnaidu/gemma-e2b-lora-emit", "Gemma E2B LoRA emit", "experiments.kaggle_lora_job", "main_emit"),
     # The final grade. The only job whose bundle contains exam 4. Needs the
     # trained model's kernel as a source: make_kaggle_kernel.py OUT final SOURCE_KERNEL
     "final": ("ommnaidu/gemma-e2b-final-grade", "Gemma E2B final grade", "experiments.kaggle_final_job", "main"),
