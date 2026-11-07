@@ -1,6 +1,6 @@
 """Pack the experiment into one Kaggle kernel script.
 
-    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora|lora_onepass]
+    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora|lora_onepass|final SOURCE_KERNEL]
     kaggle kernels push -p OUT_DIR
 
 The kernel script carries the raw writer files, `extractor/`, and
@@ -24,7 +24,11 @@ JOBS = {
     "question_order": ("ommnaidu/gemma-e2b-question-order", "Gemma E2B question order", "experiments.kaggle_job", "main"),
     "lora": ("ommnaidu/gemma-e2b-lora-evidence", "Gemma E2B LoRA evidence", "experiments.kaggle_lora_job", "main"),
     "lora_onepass": ("ommnaidu/gemma-e2b-lora-onepass", "Gemma E2B LoRA one pass", "experiments.kaggle_lora_job", "main_onepass"),
+    # The final grade. The only job whose bundle contains exam 4. Needs the
+    # trained model's kernel as a source: make_kaggle_kernel.py OUT final SOURCE_KERNEL
+    "final": ("ommnaidu/gemma-e2b-final-grade", "Gemma E2B final grade", "experiments.kaggle_final_job", "main"),
 }
+SROIE_DATASET = "urbikn/sroie-datasetv2"
 
 INCLUDE_DIRS = ("extractor", "experiments")
 EXCLUDED_RAW = ("data/exam4",)
@@ -48,32 +52,35 @@ main()
 '''
 
 
-def bundle_files() -> list[Path]:
+def bundle_files(include_exam4: bool = False) -> list[Path]:
     files = []
     for name in INCLUDE_DIRS:
         files += [p for p in (ROOT / name).rglob("*.py") if "__pycache__" not in p.parts]
     for raw in sorted((ROOT / "data").glob("*/raw")):
         rel = raw.relative_to(ROOT).as_posix()
-        if any(rel.startswith(skip) for skip in EXCLUDED_RAW):
+        if not include_exam4 and any(rel.startswith(skip) for skip in EXCLUDED_RAW):
             continue
         files += sorted(raw.glob("*.jsonl"))
     files += sorted((ROOT / "data" / "raw").glob("*.jsonl"))
     return sorted(set(files))
 
 
-def make_bundle() -> str:
+def make_bundle(include_exam4: bool = False) -> str:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for path in bundle_files():
+        for path in bundle_files(include_exam4):
             tar.add(path, arcname=path.relative_to(ROOT).as_posix())
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def write_kernel(out_dir: Path, job: str = "question_order") -> Path:
+def write_kernel(out_dir: Path, job: str = "question_order", source_kernel: str | None = None) -> Path:
     kernel_id, title, module, function = JOBS[job]
+    final = job == "final"
+    if final and not source_kernel:
+        raise ValueError("the final job needs the trained model's kernel as a source")
     out_dir.mkdir(parents=True, exist_ok=True)
     script = out_dir / "kernel.py"
-    script.write_text(f"BUNDLE = {make_bundle()!r}\n" + STUB.format(title=title, module=module, function=function))
+    script.write_text(f"BUNDLE = {make_bundle(include_exam4=final)!r}\n" + STUB.format(title=title, module=module, function=function))
     metadata = {
         "id": kernel_id,
         "title": title,
@@ -85,8 +92,8 @@ def write_kernel(out_dir: Path, job: str = "question_order") -> Path:
         "enable_tpu": False,
         "enable_internet": True,
         "keywords": [],
-        "dataset_sources": [],
-        "kernel_sources": [],
+        "dataset_sources": [SROIE_DATASET] if final else [],
+        "kernel_sources": [source_kernel] if final else [],
         "competition_sources": [],
         "model_sources": [],
         "machine_shape": "NvidiaTeslaT4",
@@ -96,5 +103,9 @@ def write_kernel(out_dir: Path, job: str = "question_order") -> Path:
 
 
 if __name__ == "__main__":
-    path = write_kernel(Path(sys.argv[1]), sys.argv[2] if len(sys.argv) > 2 else "question_order")
+    path = write_kernel(
+        Path(sys.argv[1]),
+        sys.argv[2] if len(sys.argv) > 2 else "question_order",
+        sys.argv[3] if len(sys.argv) > 3 else None,
+    )
     print(f"wrote {path} ({path.stat().st_size // 1024} KB)")
