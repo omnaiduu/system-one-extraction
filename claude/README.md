@@ -1,6 +1,8 @@
 # Claude's notes
 
-This folder is the working record of the session that rebuilt the extraction model's approach, from 7 November 2026. It is written for two readers:
+This folder is the working record of the session that rebuilt the extraction model's approach, from 7 November 2026. **If you only read two notes, read [14](14-results-at-a-glance.md) (every number) and [09](09-blog-draft.md) (the story and the claims).**
+
+**Current best model:** experiment 4, one pass per note, 223/293 (76%) fully correct final answers on 72 notes it never trained on, against 139/293 for the earlier marking approach and about 10–15% for the original four heads. Files: `outputs/experiments/lora_onepass_*`. **Next:** exact operations for percent / discount / average / date minus days, then the final grade (exam 4 and SROIE) once. It is written for two readers:
 
 - **Om, writing the engineering blog.** Everything the blog needs is here: the starting point, the diagnosis, the design decisions and the reasons, the experiments with their settings and numbers, the mistakes, and the claims that can and cannot be made.
 - **The next agent.** Read this before touching the model. It tells you what was tried, what was learned, which files matter, and how to run things.
@@ -37,6 +39,8 @@ The older notes are still true for their era and are worth reading after this: `
 11. [11 — Decision log](11-decision-log.md): every decision in order, including the wrong turns.
 12. [12 — One pass, confidence, and real receipts](12-one-pass-confidence-and-real-receipts.md)
 13. [13 — The learned reader and the emit head](13-reader-and-emit.md): what was built, why it failed, what to do instead
+14. [14 — Every result in one place](14-results-at-a-glance.md): the tables for the blog
+15. [15 — Compared with Cloudflare's Clairic](15-compared-with-cloudflare.md): capability by capability, and what would close the gap
 
 ## Ground rules that still hold
 
