@@ -40,3 +40,9 @@ Everything decided in this session, in order, including the wrong turns. Dates a
 | 34 | Detach the readers | Keep marking intact | 205; emit still 0/72 |
 | 35 | Recommend exact operations over a learned emit head | Exact values have only ever come from copy + code | Not yet built |
 | 36 | Compare with Clairic on capabilities, not accuracy | Cloudflare published no extraction accuracy or architecture | Note 15 |
+| 37 | Drop free emit; compute values that are not printed as chains of exact blocks over marked facts | Emit asks the model for arithmetic; the op head already chooses perfectly | Experiment 6 |
+| 38 | A fold in text order with order-free percent and date blocks | Keeps the step head's job a small choice per step; the roles come from the text (`%`, which operand is a date) | Exact: 1,000+ generated fields reproduce |
+| 39 | Hold out whole two-step combinations for the test | The only way to tell composing from memorizing pairs | It memorized pairs: 4/13 blocks right on unseen combinations given right marks |
+| 40 | Neutral field names (`calc_0`) | The field name is part of the question and would give the formula away | Caught before the run |
+| 41 | Stop at the stage gate | Stage 1 half works on new wording, stage 2 does not generalize | Next: snap marks to whole numbers, varied phrasing, blocks in every position |
+| 42 | For numbers and dates in words, plan a parser-first read with plain Gemma rewriting only the marked words in a forced format, checked by writing the value back | Reading formats is translation, which Gemma already does; computing is not. The check catches misreadings | Not built |

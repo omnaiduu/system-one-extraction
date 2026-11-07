@@ -64,9 +64,22 @@ AUROC 0.861. At confidence ≥ 0.99: 212 answers, 194 right (92%), covering 72% 
 | Emit numbers within 1% | 0/50 | 0/50 |
 | Operation choice | 99/103 | 103/103 |
 
+## Computed fields and chains (experiment 6)
+
+Answers never printed; facts marked, blocks chosen by the step head, arithmetic exact. Exams 1–3 original fields: 219/293 (experiment 4: 223), op choice 103/103, AUROC 0.917.
+
+| Part | Computed fields right | Blocks right given exactly right marks |
+| --- | --- | --- |
+| held (training wording, unseen notes) | 152/168 (1 step 80/84, 2 steps 72/84) | 137/137 |
+| one step, new wording | 39/72 | 33/34 |
+| two steps, trained combination, new wording | 9/72 | 9/9 |
+| two steps, new combination | 4/72 | 4/13 |
+
+Main failures: amounts clipped or parts missed on new sentence shapes (only 26 training templates), and the step head learning whole pairs rather than blocks. Details in [16](16-computed-fields-and-chains.md).
+
 ## Cost and time
 
-Everything ran on Kaggle's free T4s. Experiment 1: 39 min. Experiment 2: 50 min (plus an 11-minute failed attempt). Experiment 3: 78 min. Experiment 4: 26 min. Experiments 5a and 5b: 55 min each. No money was spent anywhere.
+Everything ran on Kaggle's free T4s. Experiment 1: 39 min. Experiment 2: 50 min (plus an 11-minute failed attempt). Experiment 3: 78 min. Experiment 4: 26 min. Experiments 5a and 5b: 55 min each. Experiment 6: 55 min. No money was spent anywhere.
 
 ## Settings shared by the LoRA runs
 

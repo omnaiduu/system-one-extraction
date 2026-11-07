@@ -2,9 +2,13 @@
 
 Current best model: **experiment 4**, one pass per note (`outputs/experiments/lora_onepass_adapter.pt`, kernel `ommnaidu/gemma-e2b-lora-onepass`), 223/293 final answers on exams 1–3.
 
-## 1. Exact operations for the common unprinted values (recommended next)
+## 1. Make computed fields generalize (recommended next)
 
-Add `percent_of`, `after_discount`, `average`, `date_minus_days` to `OPS` and `ALLOWED` in `experiments/values.py`, with exact arithmetic in `_format`. Relabel the emit variants in `augment.py` with those operations instead of `emit` (keep the training and test phrasings split). Retrain one pass with augmented notes, **without** the reader and emit heads, or with them detached. Expect the emit dev part to move from 0/72 toward the operation head's accuracy, which is already 103/103. Keep `emit` as a flagged last resort with low confidence.
+Built in experiment 6 ([16](16-computed-fields-and-chains.md)): exact blocks and chains, exact on training wording, weak on new wording. In order: (a) snap marks to whole numbers and dates, measured first with an inference-only kernel on `ommnaidu/gemma-e2b-lora-chains` (it may also help the original exams' partial bucket); (b) generate training sentences from a grammar, hundreds of surface forms, amounts in any position; (c) every block in every step position, no step-position embedding; (d) rerun with the same three held-out test sets.
+
+## 1b. Numbers and dates in words or odd formats
+
+Parser first. When the parser cannot read a marked part, plain Gemma (adapters off) rewrites only the marked words, with decoding forced to digits or an ISO date, about 7 tokens; code writes the value back in words and checks it against the marked text, else empty with low confidence. Needs real worded text (Indian cheques and invoices, "Rupees … Only") for an honest test.
 
 ## 2. The final grade, once
 
