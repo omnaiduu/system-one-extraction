@@ -104,6 +104,10 @@ def main() -> None:
         payload["results"][f"frozen {prompt}"] = result
         log(f"frozen {prompt} done: held {result['held']['exact']}/{result['held']['fields']}")
     torch.cuda.empty_cache()
+    # Save the baselines now, so a failure in the LoRA step cannot lose them.
+    partial = json.loads(json.dumps(payload, default=str))
+    (OUT / "lora_results.json").write_text(json.dumps(partial, indent=2) + "\n")
+    (OUT / "lora_results.md").write_text(summarize(partial))
 
     targets = attention_targets(model)
     config = LoraConfig(r=RANK, lora_alpha=ALPHA, lora_dropout=0.05, target_modules=targets, bias="none")
