@@ -26,6 +26,7 @@ We wanted a Clairic-style extractor on Gemma 4 E2B: read a note once, return typ
 10. **Experiment 3: final answers.** Read with the auditor's parsers, combine with its arithmetic, verified 1,309/1,309 on gold evidence. An operation head chooses the operation (102/103). 226/293 with no hand rules.
 11. **Experiment 4: one pass.** All questions before the note, one ANSWER line per field after it. 223/293, a third of the compute. Confidence scores: at ≥ 0.99, 92% right.
 12. **Experiment 5: the emit head that learned nothing.** The motivation (values not on the page, numbers in words), the data built without writer tokens, a bug the tests caught (`parse_number` read "April the second, 2026" as 2026), the result (emit 0/72; joint training dragged marking from 223 to 181; detaching recovered 205), and the lesson: every exact number that came out right came from copying the page plus exact code.
+12b. **Experiment 6: computing what is not printed, exactly.** Mark the facts, let a step head choose one block per step, compute in code. Exact on training wording (152/168; blocks 137/137), weaker on new wording (39/72 one step), and it learned pairs rather than composing (4/72 on unseen two-step combinations). The lesson repeats one level up: with 26 templates the model memorized the templates, as the four heads memorized the notes. See [16](16-computed-fields-and-chains.md).
 13. **What it does not prove yet.** See the claims below and [15](15-compared-with-cloudflare.md).
 14. **The plumbing, briefly.** Free Kaggle T4s; each experiment is one self-contained 170–200 KB kernel script; no card needed. The detours (Modal needed a card; a commit marker that triggered itself) as an honest aside.
 
@@ -58,6 +59,7 @@ We wanted a Clairic-style extractor on Gemma 4 E2B: read a note once, return typ
 - **A production accuracy.** All numbers are on one writer's synthetic notes with repeated skeletons.
 - **Exam 4 or real-document numbers** until the final grade has run, once.
 - **"Handles numbers in words" or "emits values not on the page".** Both were tested and failed.
+- **"Computes multi-step values" or "composes operations".** Only on training wording; 4/72 on unseen combinations. "Exact one-step calculations on familiar wording" is allowed.
 - **"Exams 1–3 are a clean test."** They were read by earlier rounds. They are dev, although nothing in this session was chosen on them.
 - **"LoRA is new."** It is standard. What is particular here is the combination: bracket-measured evidence labels, question-first LoRA tagging, exact typed arithmetic reused from the labeler, and an operation head.
 - **"One pass is better than per field."** 223 versus 226 is within noise (about ±8). The claim is "as good, much cheaper".
