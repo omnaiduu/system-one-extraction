@@ -167,3 +167,60 @@ def test_lora_with_operation_head_reports_final_answers():
         assert result["values"][name]["fields"] == result[name]["fields"]
     text = lora_tagger.summarize({"model": "fake", "results": {"lora": result}})
     assert "## Final answers" in text
+
+
+def test_one_pass_layout_shares_one_forward_per_note():
+    from experiments.evidence_data import build_prompt
+
+    full, start, spans = build_prompt("multi", "Fee 638.40 on 4 June.", ["fee: Printed fee", "issued: Date"])
+    assert full.index("fee: Printed fee") < start  # questions before the note
+    assert full[start:].startswith("Fee 638.40 on 4 June.")
+    assert [full[a:b] for a, b in spans] == ["fee: Printed fee", "issued: Date"]
+    assert all(a > start for a, _ in spans)  # each ANSWER line after the note
+
+    rows = [r for r in load_rows() if r["split"] == "train"][:6]
+    examples = lora_tagger.encode(rows, FakeTokenizer(), "multi")
+    groups = lora_tagger.groups_of(examples)
+    assert len(groups) == len(rows)
+    for group in groups:
+        first = examples[group[0]]
+        assert all(examples[i]["ids"] == first["ids"] for i in group)
+        assert len({examples[i]["q_index"] for i in group}) == len(group)  # one query per field
+        assert all(examples[i]["q_index"] > first["doc_index"][-1] for i in group)
+        assert all(examples[i]["end_index"] == examples[i]["q_index"] for i in group)
+
+
+def test_one_pass_training_runs_with_confidence():
+    from experiments.lora_tagger import OpHead
+
+    rows = load_rows()
+    picked = [r for r in rows if r["split"] == "train"][:20]
+    for split in ("exam1", "exam2", "exam3"):
+        picked += [r for r in rows if r["split"] == split][:1]
+    parts = lora_tagger.assign_parts(lora_tagger.encode(picked, FakeTokenizer(), "multi"))
+    tower = FakeTower()
+    calls = []
+    counted = lambda ids: calls.append(1) or tower(ids)
+    head, op_head = Tagger(2, 16), OpHead(2, 16)
+    result = lora_tagger.train_lora(parts, counted, [tower.adapter], head, [1, 2], "cpu", epochs=1,
+                                    accumulate=4, use_amp=False, op_head=op_head, log=lambda *_: None)
+    result.pop("_best")
+    fit_notes = len(lora_tagger.groups_of(parts["fit"]))
+    held_notes = len(lora_tagger.groups_of(parts["held"]))
+    assert len(calls) >= fit_notes + held_notes
+    conf = result["values"]["exam1"]["confidence"]
+    assert conf["fields"] == result["values"]["exam1"]["fields"]
+    for row in conf["thresholds"].values():
+        assert 0 <= row["right"] <= row["kept"] <= conf["fields"]
+    for ex in result["values"]["exam1"]["examples"]:
+        assert 0.0 <= ex["confidence"] <= 1.0 and 0.0 <= ex["p_null"] <= 1.0
+    assert "## Confidence" in lora_tagger.summarize({"model": "fake", "results": {"one pass": result}})
+
+
+def test_confidence_ranks_and_counts():
+    from experiments.lora_tagger import selective
+
+    out = selective([0.99, 0.95, 0.6, 0.3], [True, True, False, False])
+    assert out["auroc"] == 1.0
+    assert out["thresholds"]["0.9"] == {"kept": 2, "right": 2}
+    assert out["thresholds"]["0.5"] == {"kept": 3, "right": 2}

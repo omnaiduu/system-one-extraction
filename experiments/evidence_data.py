@@ -34,7 +34,7 @@ RAW_SOURCES = (
 
 DEV_SPLITS = ("exam1", "exam2", "exam3")
 
-PROMPTS = ("last_nobos", "last", "first")
+PROMPTS = ("last_nobos", "last", "first", "multi")
 
 
 def load_rows(root: Path = Path(".")) -> list[dict]:
@@ -115,6 +115,8 @@ def build_prompt(kind: str, text: str, bodies: list[str]) -> tuple[str, int, lis
     layout the earlier rounds used. One forward covers all questions, because
     a later question cannot change the document states.
     first: one question, then the document. One forward per question.
+    multi: all questions, the document, then an ANSWER line per question.
+    One forward per note. The returned spans are the ANSWER lines.
     """
     if kind in ("last", "last_nobos"):
         pieces = [text]
@@ -132,6 +134,18 @@ def build_prompt(kind: str, text: str, bodies: list[str]) -> tuple[str, int, lis
         body = bodies[0]
         lead = f"{head}{body}\n\nDOCUMENT\n"
         return lead + text, len(lead), [(len(head), len(head) + len(body))]
+    if kind == "multi":
+        # Every question before the note, then one ANSWER line per field after
+        # it: one forward per note, and each ANSWER line is that field's query.
+        lead = "QUESTIONS\n" + "\n".join(bodies) + "\n\nDOCUMENT\n"
+        pieces = [lead, text]
+        spans = []
+        for body in bodies:
+            pieces.append("\n\nANSWER ")
+            start = sum(len(piece) for piece in pieces)
+            pieces.append(body)
+            spans.append((start, start + len(body)))
+        return "".join(pieces), len(lead), spans
     raise ValueError(kind)
 
 

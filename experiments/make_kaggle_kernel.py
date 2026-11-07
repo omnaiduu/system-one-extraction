@@ -1,6 +1,6 @@
 """Pack the experiment into one Kaggle kernel script.
 
-    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora]
+    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora|lora_onepass]
     kaggle kernels push -p OUT_DIR
 
 The kernel script carries the raw writer files, `extractor/`, and
@@ -20,9 +20,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 JOBS = {
-    # job name: (kernel id, title, module whose main() runs)
-    "question_order": ("ommnaidu/gemma-e2b-question-order", "Gemma E2B question order", "experiments.kaggle_job"),
-    "lora": ("ommnaidu/gemma-e2b-lora-evidence", "Gemma E2B LoRA evidence", "experiments.kaggle_lora_job"),
+    # job name: (kernel id, title, module, function that runs)
+    "question_order": ("ommnaidu/gemma-e2b-question-order", "Gemma E2B question order", "experiments.kaggle_job", "main"),
+    "lora": ("ommnaidu/gemma-e2b-lora-evidence", "Gemma E2B LoRA evidence", "experiments.kaggle_lora_job", "main"),
+    "lora_onepass": ("ommnaidu/gemma-e2b-lora-onepass", "Gemma E2B LoRA one pass", "experiments.kaggle_lora_job", "main_onepass"),
 }
 
 INCLUDE_DIRS = ("extractor", "experiments")
@@ -42,7 +43,7 @@ with tarfile.open(fileobj=io.BytesIO(base64.b64decode(BUNDLE)), mode="r:gz") as 
         tar.extractall(WORK)
 os.chdir(WORK)
 sys.path.insert(0, WORK)
-from {module} import main
+from {module} import {function} as main
 main()
 '''
 
@@ -69,10 +70,10 @@ def make_bundle() -> str:
 
 
 def write_kernel(out_dir: Path, job: str = "question_order") -> Path:
-    kernel_id, title, module = JOBS[job]
+    kernel_id, title, module, function = JOBS[job]
     out_dir.mkdir(parents=True, exist_ok=True)
     script = out_dir / "kernel.py"
-    script.write_text(f"BUNDLE = {make_bundle()!r}\n" + STUB.format(title=title, module=module))
+    script.write_text(f"BUNDLE = {make_bundle()!r}\n" + STUB.format(title=title, module=module, function=function))
     metadata = {
         "id": kernel_id,
         "title": title,

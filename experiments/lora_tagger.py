@@ -48,42 +48,70 @@ DEV = ("exam1", "exam2", "exam3")
 # ---- examples ---------------------------------------------------------------
 
 
+def _field_example(row, question, ids, offsets, doc_index, doc_start, q_span, group) -> dict:
+    doc_offsets = [(offsets[i][0] - doc_start, offsets[i][1] - doc_start) for i in doc_index]
+    gold = []
+    for start, end in question["spans"]:
+        first, last = span_to_tokens(doc_offsets, start, end)
+        covered = row["text"][max(doc_offsets[first][0], 0) : doc_offsets[last][1]]
+        if row["text"][start:end].strip() not in covered:
+            raise RuntimeError(f"{row['id']} {question['field']}: tokens miss the gold words")
+        gold.append((first, last))
+    q_index = last_token_inside(offsets, *q_span)
+    return {
+        **{k: question[k] for k in ("doc", "field", "type", "op")},
+        "split": row["split"],
+        "group": group,
+        "ids": ids,
+        "doc_index": doc_index,
+        "q_index": q_index,
+        # Question first, the last prompt token has read the note. In the
+        # one-pass layout the field's own ANSWER line has read everything.
+        "end_index": len(ids) - 1 if group != row["id"] else q_index,
+        "tags": torch.tensor(bio_tags(len(doc_index), gold), dtype=torch.long),
+        "gold": gold,
+        "op_index": OPS.index(question["op"]) if question["op"] in OPS else -1,
+        "text": row["text"],
+        "doc_offsets": doc_offsets,
+        "spec": row["fields"][question["field"]],
+    }
+
+
 def encode(rows: list[dict], tokenizer, prompt: str) -> list[dict]:
-    """One example per (note, field): token ids, where the note sits, tags."""
+    """One example per (note, field). Examples with the same `group` share one forward."""
     add_bos = prompt != "last_nobos"
     examples = []
     for row in rows:
-        for question in questions(row):
+        qs = questions(row)
+        if not qs:
+            continue
+        if prompt == "multi":
+            full, doc_start, q_spans = build_prompt("multi", row["text"], [q["body"] for q in qs])
+            encoded = tokenizer(full, return_offsets_mapping=True, add_special_tokens=add_bos)
+            offsets = [(int(a), int(b)) for a, b in encoded["offset_mapping"]]
+            ids = list(encoded["input_ids"])
+            doc_index = doc_token_range(offsets, doc_start, doc_start + len(row["text"]))
+            for question, q_span in zip(qs, q_spans):
+                examples.append(_field_example(row, question, ids, offsets, doc_index, doc_start, q_span, row["id"]))
+            continue
+        for question in qs:
             full, doc_start, q_spans = build_prompt(prompt, row["text"], [question["body"]])
             encoded = tokenizer(full, return_offsets_mapping=True, add_special_tokens=add_bos)
             offsets = [(int(a), int(b)) for a, b in encoded["offset_mapping"]]
             doc_index = doc_token_range(offsets, doc_start, doc_start + len(row["text"]))
-            doc_offsets = [(offsets[i][0] - doc_start, offsets[i][1] - doc_start) for i in doc_index]
-            gold = []
-            for start, end in question["spans"]:
-                first, last = span_to_tokens(doc_offsets, start, end)
-                covered = row["text"][max(doc_offsets[first][0], 0) : doc_offsets[last][1]]
-                if row["text"][start:end].strip() not in covered:
-                    raise RuntimeError(f"{row['id']} {question['field']}: tokens miss the gold words")
-                gold.append((first, last))
-            ids = list(encoded["input_ids"])
             examples.append(
-                {
-                    **{k: question[k] for k in ("doc", "field", "type", "op")},
-                    "split": row["split"],
-                    "ids": ids,
-                    "doc_index": doc_index,
-                    "q_index": last_token_inside(offsets, *q_spans[0]),
-                    "end_index": len(ids) - 1,
-                    "tags": torch.tensor(bio_tags(len(doc_index), gold), dtype=torch.long),
-                    "gold": gold,
-                    "op_index": OPS.index(question["op"]) if question["op"] in OPS else -1,
-                    "text": row["text"],
-                    "doc_offsets": doc_offsets,
-                    "spec": row["fields"][question["field"]],
-                }
+                _field_example(row, question, list(encoded["input_ids"]), offsets, doc_index, doc_start,
+                               q_spans[0], f"{row['id']}::{question['field']}")
             )
     return examples
+
+
+def groups_of(examples: list[dict]) -> list[list[int]]:
+    """Indexes of examples that share one forward, in first-seen order."""
+    order: dict[str, list[int]] = {}
+    for index, ex in enumerate(examples):
+        order.setdefault(ex.get("group", f"{ex['doc']}::{ex['field']}"), []).append(index)
+    return list(order.values())
 
 
 def assign_parts(examples: list[dict]) -> dict[str, list[dict]]:
@@ -226,15 +254,64 @@ def final_answer(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float):
     return spans, op, predicted
 
 
+def field_confidence(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float, spans, op: str) -> dict:
+    """p_null and a confidence for the answer, from the same logits that made it.
+
+    p_null: one minus the highest probability that any token is evidence.
+    confidence: for an answer with spans, the geometric mean of the
+    probability of each decoded tag over the marked tokens and the one token
+    either side (which should be outside), times the probability of the
+    chosen operation among the legal ones. For a missing answer, p_null.
+    """
+    shifted = tag_logits.float().clone()
+    shifted[:, 1:] += bias
+    probs = torch.softmax(shifted, -1)
+    p_null = float(1.0 - (1.0 - probs[:, 0]).max())
+    if not spans:
+        return {"p_null": p_null, "confidence": p_null}
+    tags = shifted.argmax(-1)
+    picked = set()
+    for a, b in spans:
+        picked.update(range(max(a - 1, 0), min(b + 2, len(tags))))
+    logs = [float(torch.log(probs[t, int(tags[t])] + 1e-12)) for t in sorted(picked)]
+    tag_conf = float(torch.exp(torch.tensor(sum(logs) / len(logs))))
+    allowed = ALLOWED[ex["type"]]
+    op_conf = 1.0
+    if op_logits is not None and len(allowed) > 1:
+        legal = torch.softmax(torch.stack([op_logits[OPS.index(o)] for o in allowed]).float(), 0)
+        op_conf = float(legal[allowed.index(op)])
+    return {"p_null": p_null, "confidence": tag_conf * op_conf}
+
+
+def selective(confidences: list[float], right: list[bool]) -> dict:
+    """Accuracy above each confidence threshold, and how well confidence ranks right above wrong."""
+    rows = {}
+    for t in (0.5, 0.7, 0.8, 0.9, 0.95, 0.99):
+        kept = [r for c, r in zip(confidences, right) if c >= t]
+        rows[str(t)] = {"kept": len(kept), "right": sum(kept)}
+    pos = [c for c, r in zip(confidences, right) if r]
+    neg = [c for c, r in zip(confidences, right) if not r]
+    if pos and neg:
+        wins = sum((p > n) + 0.5 * (p == n) for p in pos for n in neg)
+        auroc = wins / (len(pos) * len(neg))
+    else:
+        auroc = None
+    return {"thresholds": rows, "auroc": auroc, "fields": len(right)}
+
+
 def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0) -> dict:
     from collections import Counter, defaultdict
 
     hits, by_op = Counter(), defaultdict(Counter)
     op_right = op_total = 0
     kept = []
+    confidences, rights = [], []
     for index, ex in enumerate(examples):
         spans, op, predicted = final_answer(ex, tag_logits[index], op_logits[index], bias)
         ok = matches(ex["spec"], predicted)
+        conf = field_confidence(ex, tag_logits[index], op_logits[index], bias, spans, op)
+        confidences.append(conf["confidence"])
+        rights.append(bool(ok))
         hits[ok] += 1
         by_op[ex["op"]][ok] += 1
         if ex["op"] in OPS and len(ALLOWED[ex["type"]]) > 1:
@@ -243,12 +320,14 @@ def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0) 
         if len(kept) < keep_examples:
             kept.append({"doc": ex["doc"], "field": ex["field"], "gold_op": ex["op"], "op": op,
                          "gold": ex["spec"].get("value"), "predicted": predicted["value"],
-                         "missing": predicted["missing"], "right": ok})
+                         "missing": predicted["missing"], "right": ok,
+                         "confidence": round(conf["confidence"], 6), "p_null": round(conf["p_null"], 6)})
     out = {
         "fields": len(examples),
         "exact": hits[True],
         "by_op": {op: f"{c[True]}/{c[True] + c[False]}" for op, c in sorted(by_op.items())},
         "op_choice": f"{op_right}/{op_total}",
+        "confidence": selective(confidences, rights),
     }
     if keep_examples:
         out["examples"] = kept
@@ -269,9 +348,12 @@ def pick_bias_by_value(examples, tag_logits, op_logits) -> tuple[float, dict]:
 # ---- LoRA -------------------------------------------------------------------
 
 
-def _example_states(forward, ex: dict, layers: list[int]):
-    hidden = forward(ex["ids"])
-    stacked = torch.stack([hidden[i][0] for i in layers]).float()
+def _stack(forward, ids, layers):
+    hidden = forward(ids)
+    return torch.stack([hidden[i][0] for i in layers]).float()
+
+
+def _field_states(stacked, ex: dict):
     return (
         stacked[:, ex["doc_index"]].unsqueeze(0),
         stacked[:, ex["q_index"]].unsqueeze(0),
@@ -279,20 +361,26 @@ def _example_states(forward, ex: dict, layers: list[int]):
     )
 
 
+def _example_states(forward, ex: dict, layers: list[int]):
+    return _field_states(_stack(forward, ex["ids"], layers), ex)
+
+
 def lora_logits(forward, head: Tagger, op_head, examples: list[dict], layers: list[int], autocast):
     """Tag logits and operation logits for each example."""
     head.eval()
     if op_head is not None:
         op_head.eval()
-    tags, ops = [], []
+    tags, ops = [None] * len(examples), [None] * len(examples)
     with torch.no_grad():
-        for ex in examples:
+        for group in groups_of(examples):
             with autocast():
-                doc, question, end = _example_states(forward, ex, layers)
-                logits = head(doc, question)
-                op_logits = op_head(question, end) if op_head is not None else None
-            tags.append(logits[0].float().cpu())
-            ops.append(None if op_logits is None else op_logits[0].float().cpu())
+                stacked = _stack(forward, examples[group[0]]["ids"], layers)
+                for index in group:
+                    doc, question, end = _field_states(stacked, examples[index])
+                    logits = head(doc, question)
+                    op_logits = op_head(question, end) if op_head is not None else None
+                    tags[index] = logits[0].float().cpu()
+                    ops[index] = None if op_logits is None else op_logits[0].float().cpu()
     return tags, ops
 
 
@@ -333,39 +421,50 @@ def train_lora(
 
     weights = torch.tensor(TAG_WEIGHTS, device=device)
     fit = list(parts["fit"])
+    fit_groups = groups_of(fit)
     history, best = [], None
     for epoch in range(1, epochs + 1):
         set_train(True)
         for h in heads:
             h.train()
-        rng.shuffle(fit)
-        total, skipped = 0.0, 0
+        rng.shuffle(fit_groups)
+        total, skipped, seen, pending = 0.0, 0, 0, 0
         optimizer.zero_grad()
-        for step, ex in enumerate(fit, start=1):
+        for number, group in enumerate(fit_groups, start=1):
+            # One forward per group (a note in the one-pass layout, a field otherwise).
             with autocast():
-                doc, question, end = _example_states(forward, ex, layers)
-                logits = head(doc, question)
-                op_logits = op_head(question, end) if op_head is not None else None
-            loss = F.cross_entropy(logits[0].float(), ex["tags"].to(device), weight=weights)
-            if op_logits is not None and ex.get("op_index", -1) >= 0:
-                loss = loss + F.cross_entropy(op_logits.float(), torch.tensor([ex["op_index"]], device=device))
+                stacked = _stack(forward, fit[group[0]]["ids"], layers)
+                losses = []
+                for index in group:
+                    ex = fit[index]
+                    doc, question, end = _field_states(stacked, ex)
+                    logits = head(doc, question)
+                    loss = F.cross_entropy(logits[0].float(), ex["tags"].to(device), weight=weights)
+                    if op_head is not None and ex.get("op_index", -1) >= 0:
+                        op_logits = op_head(question, end)
+                        loss = loss + F.cross_entropy(op_logits.float(), torch.tensor([ex["op_index"]], device=device))
+                    losses.append(loss)
+            loss = torch.stack(losses).sum()
             if not torch.isfinite(loss):
-                skipped += 1
+                skipped += len(group)
                 continue
             scaler.scale(loss / accumulate).backward()
             total += float(loss.detach())
-            if step % accumulate == 0 or step == len(fit):
+            seen += len(group)
+            pending += len(group)
+            if pending >= accumulate or number == len(fit_groups):
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(adapter_params + head_params, 1.0)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
-            if step % 200 == 0:
-                log(f"  lora epoch {epoch} step {step}/{len(fit)} loss {total / step:.4f}")
+                pending = 0
+            if number % 100 == 0:
+                log(f"  lora epoch {epoch} forward {number}/{len(fit_groups)} loss {total / max(seen, 1):.4f}")
         set_train(False)
         tag_l, op_l = lora_logits(forward, head, op_head, parts["held"], layers, autocast)
         bias, table = pick_bias_by_value(parts["held"], tag_l, op_l)
-        row = {"epoch": epoch, "train_loss": total / max(1, len(fit) - skipped), "skipped": skipped,
+        row = {"epoch": epoch, "train_loss": total / max(1, seen), "skipped": skipped,
                "bias": bias, "held_value_exact": table[bias][0], "held_span_exact": table[bias][1],
                "held_span_exact_at_0": table[0.0][1]}
         history.append(row)
@@ -447,6 +546,24 @@ def summarize(payload: dict) -> str:
                     x, y = merged.get(op, (0, 0))
                     merged[op] = (x + a, y + b)
             lines.append(f"- {name}: " + ", ".join(f"{op} {a}/{b}" for op, (a, b) in sorted(merged.items())))
+    confident = {name: res for name, res in valued.items() if "confidence" in res["values"].get("exam1", {})}
+    if confident:
+        lines += ["", "## Confidence, exams 1-3", "",
+                  "Kept = answers at or above the threshold; right = how many of those are correct. "
+                  "AUROC = how often a right answer has a higher confidence than a wrong one (0.5 is no signal).", ""]
+        lines.append("| Condition | AUROC | >=0.5 | >=0.7 | >=0.8 | >=0.9 | >=0.95 | >=0.99 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        for name, res in confident.items():
+            cells, aucs = [], []
+            for t in ("0.5", "0.7", "0.8", "0.9", "0.95", "0.99"):
+                kept = sum(res["values"][d]["confidence"]["thresholds"][t]["kept"] for d in DEV)
+                right = sum(res["values"][d]["confidence"]["thresholds"][t]["right"] for d in DEV)
+                cells.append(f"{right}/{kept}")
+            for d in DEV:
+                if res["values"][d]["confidence"]["auroc"] is not None:
+                    aucs.append(res["values"][d]["confidence"]["auroc"])
+            auc = f"{sum(aucs) / len(aucs):.3f}" if aucs else "-"
+            lines.append(f"| {name} | {auc} | " + " | ".join(cells) + " |")
     lines += ["", "## Evidence on exams 1-3 by operation (exact / fields)", ""]
     names = list(payload["results"])
     ops = sorted({op for res in payload["results"].values() for d in DEV for op in res[d]["by_op"]})

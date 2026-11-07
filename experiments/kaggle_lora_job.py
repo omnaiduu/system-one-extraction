@@ -54,6 +54,16 @@ def attention_targets(model) -> list[str]:
 
 
 def main() -> None:
+    """Experiment 3: question first, one forward per field, 10 epochs, final answers."""
+    run_job(layout="first", epochs=EPOCHS, prefix="lora", run_frozen=RUN_FROZEN)
+
+
+def main_onepass() -> None:
+    """Experiment 4: every field in one forward per note (like Clairic), with confidence."""
+    run_job(layout="multi", epochs=EPOCHS, prefix="lora_onepass", run_frozen=False)
+
+
+def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool) -> None:
     import torch
     import transformers
     from peft import LoraConfig, inject_adapter_in_model
@@ -90,15 +100,16 @@ def main() -> None:
         raise FloatingPointError("float16 hidden states are not finite")
     log(f"{depth} layers, using {layers}; {len(rows)} notes")
 
-    payload = {"model": MODEL, "dtype": "float16", "layers": layers, "results": {}}
+    payload = {"model": MODEL, "dtype": "float16", "layers": layers, "layout": layout, "results": {}}
     parts_by_prompt = {}
-    for prompt in (("last_nobos", "first") if RUN_FROZEN else ("first",)):
+    for prompt in (("last_nobos", "first") if run_frozen else ()) + (layout,):
         parts_by_prompt[prompt] = assign_parts(encode(rows, tokenizer, prompt))
-    sizes = {name: len(part) for name, part in parts_by_prompt["first"].items()}
+    sizes = {name: len(part) for name, part in parts_by_prompt[layout].items()}
     payload["sizes"] = sizes
-    log(f"split sizes {sizes}")
+    payload["forwards_per_epoch"] = len({ex["group"] for ex in parts_by_prompt[layout]["fit"]})
+    log(f"split sizes {sizes}; {payload['forwards_per_epoch']} training forwards per epoch")
 
-    for prompt in (("last_nobos", "first") if RUN_FROZEN else ()):
+    for prompt in (("last_nobos", "first") if run_frozen else ()):
         t0 = time.time()
         log(f"frozen {prompt}")
         result = run_frozen(parts_by_prompt[prompt], forward, layers, device, log=log)
@@ -108,8 +119,8 @@ def main() -> None:
     torch.cuda.empty_cache()
     # Save the baselines now, so a failure in the LoRA step cannot lose them.
     partial = json.loads(json.dumps(payload, default=str))
-    (OUT / "lora_results.json").write_text(json.dumps(partial, indent=2) + "\n")
-    (OUT / "lora_results.md").write_text(summarize(partial))
+    (OUT / f"{prefix}_results.json").write_text(json.dumps(partial, indent=2) + "\n")
+    (OUT / f"{prefix}_results.md").write_text(summarize(partial))
 
     targets = attention_targets(model)
     config = LoraConfig(r=RANK, lora_alpha=ALPHA, lora_dropout=0.05, target_modules=targets, bias="none")
@@ -132,18 +143,18 @@ def main() -> None:
     op_head = OpHead(len(layers), hidden[0].shape[-1]).to(device)
     t0 = time.time()
     result = train_lora(
-        parts_by_prompt["first"], forward, adapter_params, head, layers, device,
-        epochs=EPOCHS, set_train=lambda flag: model.train(flag), op_head=op_head, log=log,
+        parts_by_prompt[layout], forward, adapter_params, head, layers, device,
+        epochs=epochs, set_train=lambda flag: model.train(flag), op_head=op_head, log=log,
     )
     best = result.pop("_best")
     result["seconds"] = round(time.time() - t0, 1)
-    payload["results"][f"lora first, {EPOCHS} epochs"] = result
+    payload["results"][f"lora {layout}, {epochs} epochs"] = result
     torch.save({"adapter_names": [n for n, p in model.named_parameters() if "lora_" in n],
                 "adapter": best["adapter"], "head": best["head"], "op_head": best["heads"][1], "layers": layers,
-                "lora": payload["lora"], "bias": best["bias"]}, OUT / "lora_adapter.pt")
+                "lora": payload["lora"], "bias": best["bias"], "layout": layout}, OUT / f"{prefix}_adapter.pt")
 
     payload["seconds"] = round(time.time() - started, 1)
     payload = json.loads(json.dumps(payload, default=str))
-    (OUT / "lora_results.json").write_text(json.dumps(payload, indent=2) + "\n")
-    (OUT / "lora_results.md").write_text(summarize(payload))
+    (OUT / f"{prefix}_results.json").write_text(json.dumps(payload, indent=2) + "\n")
+    (OUT / f"{prefix}_results.md").write_text(summarize(payload))
     log(f"done in {payload['seconds']} s")
