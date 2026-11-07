@@ -173,3 +173,22 @@ def test_pipeline_end_to_end_on_fake_states(monkeypatch):
     text = summarize(payload)
     assert "| last, dev exams 1-3 |" in text
     assert "| first, CV" in text
+
+
+def test_kaggle_kernel_bundle_unpacks_without_exam4(tmp_path):
+    import base64, io, tarfile
+    from experiments.make_kaggle_kernel import write_kernel
+
+    script = write_kernel(tmp_path / "kernel")
+    source = script.read_text()
+    compile(source, str(script), "exec")
+    namespace = {}
+    exec(source.split("\n", 1)[0], namespace)
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(namespace["BUNDLE"])), mode="r:gz") as tar:
+        names = tar.getnames()
+    assert "experiments/kaggle_job.py" in names
+    assert "extractor/audit.py" in names
+    assert any(name.startswith("data/exam3/raw/") for name in names)
+    assert not any(name.startswith("data/exam4") for name in names)
+    meta = json.loads((tmp_path / "kernel" / "kernel-metadata.json").read_text())
+    assert meta["enable_gpu"] and meta["enable_internet"] and meta["is_private"]
