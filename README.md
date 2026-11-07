@@ -6,7 +6,7 @@ The heads already trained are not good enough. The next work is a different way 
 
 A test that only marked words, and let a program do the sum or the date, failed. A number or a date is often not on the page, or it is written in words. That test is closed. Do not continue it.
 
-Read `blogs/handoff-for-the-next-agent.md` before changing the model. `blogs/mark-and-measure.md` is how the training rows are made.
+**Start with `claude/README.md`**: the record of the point-read-combine work, the LoRA result, and how to run everything. Then read `blogs/handoff-for-the-next-agent.md` for the earlier era. `blogs/mark-and-measure.md` is how the training rows are made.
 
 ## Current experiment: does question order matter?
 
