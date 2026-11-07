@@ -64,7 +64,7 @@ def _load_model(token):
     raise RuntimeError("could not load Gemma:\n" + "\n".join(errors))
 
 
-@app.function(image=image, gpu="A10G", timeout=4 * 3600, memory=32768, volumes={"/cache": volume}, secrets=[hf_secret])
+@app.function(image=image, gpu="A10G", timeout=90 * 60, memory=32768, volumes={"/cache": volume}, secrets=[hf_secret])
 def run(prompts: list[str]) -> dict:
     import torch
     import transformers

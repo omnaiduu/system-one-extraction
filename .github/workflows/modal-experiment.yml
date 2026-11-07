@@ -1,8 +1,9 @@
 name: modal-experiment
 
 # Runs the question-order experiment on a Modal GPU and commits the result
-# files back to the branch. Pushes to experiments/** on the working branch
-# start it; it can also be started by hand from the Actions tab.
+# files back to the branch. The budget is small, so a push only spends GPU
+# time when its commit message contains [run]. Every push still runs the
+# tests. Re-running a past run from the Actions tab also works.
 
 on:
   push:
@@ -26,12 +27,13 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 120
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       PROMPTS: ${{ github.event.inputs.prompts || 'last_nobos,last,first' }}
+      GPU_RUN: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,7 +61,7 @@ jobs:
         run: python -m pytest -q
 
       - name: Run on Modal
-        if: env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != ''
+        if: env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != '' && env.GPU_RUN == 'true'
         run: |
           # Pasted secrets often carry a trailing newline, which Modal rejects.
           export MODAL_TOKEN_ID="$(printf '%s' "$MODAL_TOKEN_ID" | tr -d '[:space:]')"
@@ -68,7 +70,7 @@ jobs:
           modal run experiments/modal_app.py --prompts "$PROMPTS"
 
       - name: Commit results
-        if: env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != ''
+        if: env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != '' && env.GPU_RUN == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
