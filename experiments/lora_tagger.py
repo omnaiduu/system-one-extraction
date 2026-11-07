@@ -38,7 +38,7 @@ from experiments.evidence_data import (
     span_to_tokens,
 )
 from experiments.evidence_heads import TAG_WEIGHTS, Tagger, _batch, folds_for, score, train_tagger
-from experiments.values import ALLOWED, OPS, answer, matches, span_texts
+from experiments.values import ALLOWED, BLOCKS, MAX_STEPS, OPS, answer, blocks_for, is_rate, matches, span_texts
 
 SEED = 7
 BIASES = (-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0)
@@ -71,6 +71,8 @@ def _field_example(row, question, ids, offsets, doc_index, doc_start, q_span, gr
         "tags": torch.tensor(bio_tags(len(doc_index), gold), dtype=torch.long),
         "gold": gold,
         "op_index": OPS.index(question["op"]) if question["op"] in OPS else -1,
+        # Chains: the gold block of each step (gold parts in text order).
+        "blocks": [BLOCKS.index(b) for b in row["fields"][question["field"]].get("blocks") or []],
         "text": row["text"],
         "doc_offsets": doc_offsets,
         "spec": row["fields"][question["field"]],
@@ -261,12 +263,14 @@ class OpHead(torch.nn.Module):
     first, has read the whole note).
     """
 
-    def __init__(self, layers: int, width: int, inner: int = 128) -> None:
+    def __init__(self, layers: int, width: int, inner: int = 128, outputs: int | None = None) -> None:
         super().__init__()
         self.mix = torch.nn.Parameter(torch.zeros(layers))
         self.norm = torch.nn.LayerNorm(2 * width)
+        # `outputs`: older checkpoints were trained before "average" and "chain" existed.
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(2 * width, inner), torch.nn.GELU(), torch.nn.Dropout(0.1), torch.nn.Linear(inner, len(OPS))
+            torch.nn.Linear(2 * width, inner), torch.nn.GELU(), torch.nn.Dropout(0.1),
+            torch.nn.Linear(inner, outputs or len(OPS)),
         )
 
     def forward(self, question: torch.Tensor, end: torch.Tensor) -> torch.Tensor:
@@ -274,6 +278,64 @@ class OpHead(torch.nn.Module):
         q = torch.einsum("k,bkh->bh", weights, F.layer_norm(question, question.shape[-1:]))
         e = torch.einsum("k,bkh->bh", weights, F.layer_norm(end, end.shape[-1:]))
         return self.net(self.norm(torch.cat([q, e], dim=-1)))
+
+
+class StepHead(torch.nn.Module):
+    """Which block each step of a chain uses.
+
+    Step k combines the running value with marked part k+1. It reads the
+    field's ANSWER token (which has read the note and the question), and the
+    marked parts k and k+1 together with a few tokens after each: attention is
+    causal, so the words that say what to do with a number ("15% *off*") come
+    after it, and only later tokens have seen them.
+    """
+
+    def __init__(self, layers: int, width: int, inner: int = 128, window: int = 4) -> None:
+        super().__init__()
+        self.mix = torch.nn.Parameter(torch.zeros(layers))
+        self.norm = torch.nn.LayerNorm(3 * width)
+        self.step = torch.nn.Embedding(MAX_STEPS, 3 * width)
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(3 * width, inner), torch.nn.GELU(), torch.nn.Dropout(0.1), torch.nn.Linear(inner, len(BLOCKS))
+        )
+        self.window = window
+
+    def forward(self, doc: torch.Tensor, end: torch.Tensor, spans) -> torch.Tensor | None:
+        """doc [K, T, H], end [K, H], spans in text order -> [steps, len(BLOCKS)], or None."""
+        steps = len(spans) - 1
+        if steps < 1 or steps > MAX_STEPS:
+            return None
+        weights = torch.softmax(self.mix, 0)
+        d = torch.einsum("k,kth->th", weights, F.layer_norm(doc, doc.shape[-1:]))
+        e = torch.einsum("k,kh->h", weights, F.layer_norm(end, end.shape[-1:]))
+
+        def around(span):
+            a, b = span
+            return d[a : min(b + 1 + self.window, d.shape[0])].mean(0)
+
+        rows = [torch.cat([e, around(spans[k]), around(spans[k + 1])]) for k in range(steps)]
+        x = torch.stack(rows) + self.step(torch.arange(steps, device=d.device))
+        return self.net(self.norm(x))
+
+
+def choose_blocks(ex: dict, step_logits: torch.Tensor | None) -> list[str] | None:
+    if step_logits is None:
+        return None
+    allowed = blocks_for(ex["type"])
+    return [max(allowed, key=lambda b: float(row[BLOCKS.index(b)])) for row in step_logits]
+
+
+def chain_extras(step_head, ex: dict, doc: torch.Tensor, end: torch.Tensor, tag_logits: torch.Tensor) -> dict:
+    """Step logits for every span set any candidate bias could decode."""
+    out = {}
+    if step_head is None or ex["type"] not in ("number", "date"):
+        return out
+    for bias in BIASES:
+        spans = tuple(decode(tag_logits, bias))
+        if spans not in out:
+            logits = step_head(doc, end, list(spans))
+            out[spans] = None if logits is None else logits.float().cpu()
+    return out
 
 
 # ---- learned reader and emit heads ---------------------------------------------
@@ -413,7 +475,12 @@ def final_answer(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float, ext
     op = choose_op(ex, op_logits)
     read = None
     emitted = None
-    if extra is not None:
+    blocks = rates = None
+    if op == "chain" and extra is not None:
+        blocks = choose_blocks(ex, extra.get("chain", {}).get(tuple(spans)))
+        parts = span_texts(ex["text"], ex["doc_offsets"], spans)
+        rates = [is_rate(ex["text"], ex["doc_offsets"][b][1], part) for (a, b), part in zip(spans, parts)]
+    if extra is not None and extra.get("number"):
         def read(index, kind):
             span = spans[index]
             if kind == "date":
@@ -423,12 +490,15 @@ def final_answer(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float, ext
                 return int(value)
             return value
 
-        emitted = extra["emit"].get(tuple(spans))
-    predicted = answer(op, span_texts(ex["text"], ex["doc_offsets"], spans), ex["spec"], read=read, emitted=emitted)
+        emitted = extra.get("emit", {}).get(tuple(spans))
+    predicted = answer(op, span_texts(ex["text"], ex["doc_offsets"], spans), ex["spec"], read=read, emitted=emitted,
+                       blocks=blocks, rates=rates)
+    if blocks is not None:
+        predicted["blocks"] = blocks
     return spans, op, predicted
 
 
-def field_confidence(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float, spans, op: str) -> dict:
+def field_confidence(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float, spans, op: str, extra=None) -> dict:
     """p_null and a confidence for the answer, from the same logits that made it.
 
     p_null: one minus the highest probability that any token is evidence.
@@ -454,7 +524,16 @@ def field_confidence(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float,
     if op_logits is not None and len(allowed) > 1:
         legal = torch.softmax(torch.stack([op_logits[OPS.index(o)] for o in allowed]).float(), 0)
         op_conf = float(legal[allowed.index(op)])
-    return {"p_null": p_null, "confidence": tag_conf * op_conf}
+    step_conf = 1.0
+    if op == "chain":
+        steps = (extra or {}).get("chain", {}).get(tuple(spans))
+        if steps is None:
+            step_conf = 0.0
+        else:
+            legal = [BLOCKS.index(b) for b in blocks_for(ex["type"])]
+            for row in steps:
+                step_conf *= float(torch.softmax(row[legal].float(), 0).max())
+    return {"p_null": p_null, "confidence": tag_conf * op_conf * step_conf}
 
 
 def selective(confidences: list[float], right: list[bool]) -> dict:
@@ -477,6 +556,8 @@ def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0, 
     from collections import Counter, defaultdict
 
     hits, by_op = Counter(), defaultdict(Counter)
+    by_kind, by_steps = defaultdict(Counter), defaultdict(Counter)
+    blocks_right = blocks_total = 0
     op_right = op_total = 0
     emit_close = emit_total = 0
     kept = []
@@ -490,7 +571,16 @@ def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0, 
             gold, got = ex["spec"]["value"], predicted["value"]
             if isinstance(got, (int, float)) and gold and abs(got - gold) <= 0.01 * abs(gold):
                 emit_close += 1
-        conf = field_confidence(ex, tag_logits[index], op_logits[index], bias, spans, op)
+        conf = field_confidence(ex, tag_logits[index], op_logits[index], bias, spans, op, extra)
+        if ex["spec"].get("chain_kind"):
+            by_kind[ex["spec"]["chain_kind"]][ok] += 1
+            by_steps[str(ex["spec"].get("steps", 1))][ok] += 1
+        if ex["op"] == "chain" and list(spans) == list(ex["gold"]):
+            # The step head alone: given the right marks, were the blocks right?
+            blocks_total += 1
+            steps = (extra or {}).get("chain", {}).get(tuple(spans))
+            chosen = choose_blocks(ex, steps)
+            blocks_right += chosen is not None and [BLOCKS.index(b) for b in chosen] == ex["blocks"]
         confidences.append(conf["confidence"])
         rights.append(bool(ok))
         hits[ok] += 1
@@ -501,6 +591,8 @@ def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0, 
         if len(kept) < keep_examples:
             kept.append({"doc": ex["doc"], "field": ex["field"], "gold_op": ex["op"], "op": op,
                          "gold": ex["spec"].get("value"), "predicted": predicted["value"],
+                         **({"kind": ex["spec"]["chain_kind"], "gold_blocks": ex["spec"].get("blocks"),
+                             "blocks": predicted.get("blocks")} if ex["spec"].get("chain_kind") else {}),
                          "missing": predicted["missing"], "right": ok,
                          "confidence": round(conf["confidence"], 6), "p_null": round(conf["p_null"], 6)})
     out = {
@@ -509,6 +601,9 @@ def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0, 
         "by_op": {op: f"{c[True]}/{c[True] + c[False]}" for op, c in sorted(by_op.items())},
         "op_choice": f"{op_right}/{op_total}",
         "emit_number_within_1pct": f"{emit_close}/{emit_total}",
+        "by_kind": {k: f"{c[True]}/{c[True] + c[False]}" for k, c in sorted(by_kind.items())},
+        "by_steps": {k: f"{c[True]}/{c[True] + c[False]}" for k, c in sorted(by_steps.items())},
+        "blocks_given_right_marks": f"{blocks_right}/{blocks_total}",
         "confidence": selective(confidences, rights),
     }
     if keep_examples:
@@ -547,11 +642,14 @@ def _example_states(forward, ex: dict, layers: list[int]):
     return _field_states(_stack(forward, ex["ids"], layers), ex)
 
 
-def lora_logits(forward, head: Tagger, op_head, examples: list[dict], layers: list[int], autocast, readers=None):
-    """Tag logits, operation logits, and reader/emit outputs for each example."""
+def lora_logits(forward, head: Tagger, op_head, examples: list[dict], layers: list[int], autocast, readers=None,
+                step_head=None):
+    """Tag logits, operation logits, and reader/emit/step outputs for each example."""
     head.eval()
     if op_head is not None:
         op_head.eval()
+    if step_head is not None:
+        step_head.eval()
     for reader in (readers or {}).values():
         reader.eval()
     tags, ops, extras = [None] * len(examples), [None] * len(examples), [None] * len(examples)
@@ -565,9 +663,10 @@ def lora_logits(forward, head: Tagger, op_head, examples: list[dict], layers: li
                     op_logits = op_head(question, end) if op_head is not None else None
                     tags[index] = logits[0].float().cpu()
                     ops[index] = None if op_logits is None else op_logits[0].float().cpu()
-                    if readers is not None:
+                    if readers is not None or step_head is not None:
                         extras[index] = reader_extras(readers, examples[index], doc[0], end[0], tags[index])
-    return tags, ops, (extras if readers is not None else None)
+                        extras[index]["chain"] = chain_extras(step_head, examples[index], doc[0], end[0], tags[index])
+    return tags, ops, (extras if readers is not None or step_head is not None else None)
 
 
 def _reader_losses(readers: dict, ex: dict, doc: torch.Tensor, question: torch.Tensor) -> torch.Tensor:
@@ -612,6 +711,7 @@ def train_lora(
     set_train=lambda flag: None,
     op_head: OpHead | None = None,
     readers: dict | None = None,
+    step_head: StepHead | None = None,
     log=print,
 ) -> dict:
     """Train adapters, tagger and operation head together.
@@ -622,6 +722,8 @@ def train_lora(
     rng = random.Random(SEED)
     torch.manual_seed(SEED)
     heads = [head] + ([op_head] if op_head is not None else []) + list((readers or {}).values())
+    if step_head is not None:
+        heads.append(step_head)  # last, so readers keep their slots in best["heads"]
     head_params = [p for h in heads for p in h.parameters()]
     optimizer = torch.optim.AdamW(
         [{"params": adapter_params, "lr": lr_adapter}, {"params": head_params, "lr": lr_head}],
@@ -662,6 +764,12 @@ def train_lora(
                         # push back into the adapters. Joint training let the reader
                         # losses (about 100x the tagger's) take the adapters over.
                         loss = loss + _reader_losses(readers, ex, doc[0].detach(), end[0].detach())
+                    if step_head is not None and ex.get("blocks") and len(ex["blocks"]) == len(ex["gold"]) - 1:
+                        # Teacher forcing: the gold marks, the gold block of each step.
+                        # Not detached: like the operation head, a small loss that
+                        # may shape the adapters.
+                        step_logits = step_head(doc[0], end[0], ex["gold"])
+                        loss = loss + F.cross_entropy(step_logits.float(), torch.tensor(ex["blocks"], device=device))
                     losses.append(loss)
             loss = torch.stack(losses).sum()
             if not torch.isfinite(loss):
@@ -681,7 +789,7 @@ def train_lora(
             if number % 100 == 0:
                 log(f"  lora epoch {epoch} forward {number}/{len(fit_groups)} loss {total / max(seen, 1):.4f}")
         set_train(False)
-        tag_l, op_l, ex_l = lora_logits(forward, head, op_head, parts["held"], layers, autocast, readers)
+        tag_l, op_l, ex_l = lora_logits(forward, head, op_head, parts["held"], layers, autocast, readers, step_head)
         bias, table = pick_bias_by_value(parts["held"], tag_l, op_l, ex_l)
         row = {"epoch": epoch, "train_loss": total / max(1, seen), "skipped": skipped,
                "bias": bias, "held_value_exact": table[bias][0], "held_span_exact": table[bias][1],
@@ -704,7 +812,7 @@ def train_lora(
     result = {"epoch": best["epoch"], "bias": best["bias"], "history": history, "values": {}}
 
     def both(name, examples, keep):
-        tag_l, op_l, ex_l = lora_logits(forward, head, op_head, examples, layers, autocast, readers)
+        tag_l, op_l, ex_l = lora_logits(forward, head, op_head, examples, layers, autocast, readers, step_head)
         result[name] = report_part(examples, tag_l, best["bias"], keep_examples=keep)
         result["values"][name] = value_report(examples, tag_l, op_l, best["bias"], keep_examples=keep, extras=ex_l)
 
@@ -767,6 +875,29 @@ def summarize(payload: dict) -> str:
                     v = res["values"].get(part)
                     if v:
                         lines.append(f"| {name} | {part} | {v['exact']}/{v['fields']} | {v['by_op']} | {v.get('emit_number_within_1pct', '-')} |")
+        chain_parts = [p for p in ["held"] + extra_parts
+                       if any(res["values"].get(p, {}).get("by_kind") for res in valued.values())]
+        if chain_parts:
+            lines += ["", "### Computed fields (answers never printed)", "",
+                      "`single`: one step. `combo_seen`: two steps, a combination training has, new wording. "
+                      "`combo_unseen`: two steps, a combination training never has. "
+                      "Blocks right = the step head's choices, on fields whose marks were exactly right.", ""]
+            lines.append("| Condition | Part | Computed fields right | 1 step | 2 steps | Blocks right given right marks |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for name, res in valued.items():
+                for part in chain_parts:
+                    v = res["values"].get(part)
+                    if not v or not v.get("by_kind"):
+                        continue
+                    right = sum(int(c.split("/")[0]) for c in v["by_kind"].values())
+                    total = sum(int(c.split("/")[1]) for c in v["by_kind"].values())
+                    lines.append(f"| {name} | {part} | {right}/{total} | {v['by_steps'].get('1', '-')} | "
+                                 f"{v['by_steps'].get('2', '-')} | {v['blocks_given_right_marks']} |")
+            for name, res in valued.items():
+                for part in chain_parts:
+                    v = res["values"].get(part)
+                    if v and v.get("by_kind"):
+                        lines.append(f"- {name}, {part}: " + ", ".join(f"{k} {c}" for k, c in v["by_kind"].items()))
         lines += ["", "Final answers by operation, exams 1-3:", ""]
         for name, res in valued.items():
             merged = {}

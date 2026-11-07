@@ -54,6 +54,15 @@ def summarize(payload: dict) -> str:
     for kind, v in payload.get("exam4_augmented", {}).items():
         lines.append(f"- Exam 4 with {kind} variants: **{v['exact']}/{v['fields']}**; by operation {v['by_op']}; "
                      f"emit numbers within 1%: {v.get('emit_number_within_1pct')}")
+    chains = payload.get("exam4_chains")
+    if chains:
+        lines += ["", "Exam 4 with one computed field inserted per note (held-out phrasings; answers never printed):", "",
+                  "| Kind | Computed fields right | Blocks right given right marks | All fields right | By kind |",
+                  "| --- | --- | --- | --- | --- |"]
+        for kind, v in chains.items():
+            c = v["computed"]
+            lines.append(f"| {kind} | {c['exact']}/{c['fields']} | {c['blocks_given_right_marks']} | "
+                         f"{v['all_fields']['exact']}/{v['all_fields']['fields']} | {c['by_kind']} |")
     lines += [
         "",
         "## SROIE test receipts (real scanned receipts, zero-shot)",
@@ -92,7 +101,7 @@ def main() -> None:
     from experiments.evidence_data import load_rows
     from experiments.evidence_heads import Tagger
     from experiments.kaggle_lora_job import attention_targets, text_tower
-    from experiments.lora_tagger import OpHead, encode, lora_logits, make_readers, report_part, value_report
+    from experiments.lora_tagger import OpHead, StepHead, encode, lora_logits, make_readers, report_part, value_report
 
     started = time.time()
     device = "cuda:0"
@@ -125,15 +134,21 @@ def main() -> None:
     width = tower.config.hidden_size if hasattr(tower, "config") else 1536
     head = Tagger(len(layers), width).to(device)
     head.load_state_dict(checkpoint["head"])
-    op_head = OpHead(len(layers), width).to(device)
+    # Older checkpoints have fewer operations (before "average" and "chain").
+    op_outputs = checkpoint["op_head"]["net.3.weight"].shape[0]
+    op_head = OpHead(len(layers), width, outputs=op_outputs).to(device)
     op_head.load_state_dict(checkpoint["op_head"])
+    step_head = None
+    if checkpoint.get("step_head"):
+        step_head = StepHead(len(layers), width).to(device)
+        step_head.load_state_dict(checkpoint["step_head"])
     readers = None
     if checkpoint.get("readers"):
         readers = make_readers(len(layers), width)
         for name, reader in readers.items():
             reader.load_state_dict(checkpoint["readers"][name])
             reader.to(device)
-    log(f"loaded {len(names)} adapter tensors, tagger, operation head, readers: {sorted(readers) if readers else None}")
+    log(f"loaded {len(names)} adapter tensors, tagger, operation head, readers: {sorted(readers) if readers else None}, step head: {step_head is not None}")
 
     def forward(ids):
         out = tower(input_ids=torch.tensor([ids], device=device), output_hidden_states=True, use_cache=False)
@@ -146,7 +161,7 @@ def main() -> None:
 
     exam4 = [row for row in load_rows() if row["split"] == "exam4"]
     examples = encode(exam4, tokenizer, layout)
-    tags, ops, extras = lora_logits(forward, head, op_head, examples, layers, autocast, readers)
+    tags, ops, extras = lora_logits(forward, head, op_head, examples, layers, autocast, readers, step_head)
     payload["exam4"] = {
         "notes": len(exam4),
         "evidence": report_part(examples, tags, bias, keep_examples=200),
@@ -161,9 +176,26 @@ def main() -> None:
         for kind, variants in (("words", [r for r in augment(exam4, seed=47, emits=0, templates=TEST_TEMPLATES)]),
                                ("emit", [r for r in augment(exam4, seed=53, words=0, templates=TEST_TEMPLATES)])):
             ex_aug = encode(variants, tokenizer, layout)
-            t, o, x = lora_logits(forward, head, op_head, ex_aug, layers, autocast, readers)
+            t, o, x = lora_logits(forward, head, op_head, ex_aug, layers, autocast, readers, step_head)
             payload["exam4_augmented"][kind] = value_report(ex_aug, t, o, bias, keep_examples=100, extras=x)
             log(f"exam 4 {kind}: {payload['exam4_augmented'][kind]['exact']}/{payload['exam4_augmented'][kind]['fields']}")
+    if step_head is not None:
+        # Exam 4 with computed fields inserted, held-out phrasings, the same three kinds.
+        from experiments.chains import test_variants
+
+        payload["exam4_chains"] = {}
+        variants = test_variants(exam4, seed=59)
+        for kind in ("single", "combo_seen", "combo_unseen"):
+            ex_c = encode([r for r in variants if r["chain_test"] == kind], tokenizer, layout)
+            t, o, x = lora_logits(forward, head, op_head, ex_c, layers, autocast, readers, step_head)
+            calc = [i for i, e in enumerate(ex_c) if e["field"].startswith("calc_")]
+            payload["exam4_chains"][kind] = {
+                "all_fields": value_report(ex_c, t, o, bias, extras=x),
+                "computed": value_report([ex_c[i] for i in calc], [t[i] for i in calc], [o[i] for i in calc], bias,
+                                         keep_examples=100, extras=[x[i] for i in calc]),
+            }
+            c = payload["exam4_chains"][kind]["computed"]
+            log(f"exam 4 {kind}: computed {c['exact']}/{c['fields']}")
     log(f"exam 4: final answers {payload['exam4']['values']['exact']}/{payload['exam4']['values']['fields']}")
     (OUT / "final_results.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
 
@@ -173,7 +205,7 @@ def main() -> None:
     root = roots[0]
     rows, skipped = sroie.load_split(root)
     examples = encode(rows, tokenizer, layout)
-    tags, ops, extras = lora_logits(forward, head, op_head, examples, layers, autocast, readers)
+    tags, ops, extras = lora_logits(forward, head, op_head, examples, layers, autocast, readers, step_head)
     payload["sroie"] = {"receipts": len(rows), "skipped": skipped, "score": sroie.score(examples, tags, ops, bias, extras)}
     o = payload["sroie"]["score"]["overall"]
     log(f"sroie: found {o['found']}/{o['fields']}, value {o['value']}, wide dates {o['value_wide_dates']}")

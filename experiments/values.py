@@ -26,18 +26,94 @@ from extractor.audit import Drop, parse_date, parse_datetime, parse_number, pars
 OPS = (
     "copy", "list", "read_number", "read_date", "read_time", "read_datetime",
     "sum", "subtract", "product", "add_days", "days_between", "median", "emit",
+    "average", "chain",
 )
-# "emit": no listed operation fits, so the emit head writes the value itself.
+# "emit": no listed operation fits, so the emit head writes the value itself
+# (experiment 5; it learned nothing, and is kept only as a flagged last resort).
+# "average": the mean of every marked amount.
+# "chain": the marked parts, in text order, folded through one block per step
+# (see BLOCKS). The blocks are chosen by the step head; the arithmetic is here.
+# New operations go at the end so older checkpoints keep their indexes.
 ALLOWED = {
     "text": ("copy",),
     "list": ("list",),
-    "number": ("read_number", "sum", "subtract", "product", "emit"),
+    "number": ("read_number", "sum", "subtract", "product", "emit", "average", "chain"),
     "duration": ("days_between",),
-    "date": ("read_date", "add_days", "emit"),
+    "date": ("read_date", "add_days", "emit", "chain"),
     "time": ("read_time",),
     "datetime": ("read_datetime",),
     "estimate": ("median",),
 }
+
+
+# ---- blocks for chains --------------------------------------------------------
+#
+# A chain folds the marked parts left to right: acc = part 1, then for each
+# step k, acc = block_k(acc, part k+1). The number of steps is fixed by how many
+# parts are marked; the step head only chooses each block. The percent blocks
+# take the rate from whichever operand is a marked percentage ("15" followed by
+# "%"), so "15% off 2,400" and "2,400 less 15%" use the same block. The date
+# blocks take the date from whichever operand is a date.
+
+NUMBER_BLOCKS = ("add", "subtract", "multiply", "divide", "percent_of", "minus_percent", "plus_percent")
+DATE_BLOCKS = ("add_days", "minus_days", "add_weeks", "minus_weeks")
+BLOCKS = NUMBER_BLOCKS + DATE_BLOCKS
+MAX_STEPS = 3
+
+
+def blocks_for(kind: str) -> tuple[str, ...]:
+    """The blocks a chain may use for an answer of this type."""
+    return DATE_BLOCKS if kind == "date" else NUMBER_BLOCKS
+
+
+def is_rate(text: str, end: int, part: str = "") -> bool:
+    """A marked number is a rate when it carries or is followed by a percent sign or 'per cent'."""
+    if "%" in part:
+        return True
+    after = text[end : end + 12].lstrip().lower()
+    return after.startswith("%") or after.startswith("per cent") or after.startswith("percent")
+
+
+def apply_block(block: str, acc, x, acc_rate: bool = False, x_rate: bool = False):
+    """One step of a chain. Exact: Decimal amounts, date objects."""
+    if block in NUMBER_BLOCKS:
+        if isinstance(acc, date) or isinstance(x, date):
+            raise ValueError("number block on a date")
+        if block == "add":
+            return acc + x
+        if block == "subtract":
+            return acc - x
+        if block == "multiply":
+            return acc * x
+        if block == "divide":
+            return acc / x
+        amount, rate = (x, acc) if acc_rate and not x_rate else (acc, x)
+        if block == "percent_of":
+            return amount * rate / 100
+        if block == "minus_percent":
+            return amount * (100 - rate) / 100
+        if block == "plus_percent":
+            return amount * (100 + rate) / 100
+    if block in DATE_BLOCKS:
+        dates = [v for v in (acc, x) if isinstance(v, date)]
+        counts = [v for v in (acc, x) if not isinstance(v, date)]
+        if len(dates) != 1 or len(counts) != 1 or counts[0] != counts[0].to_integral_value():
+            raise ValueError("a date block needs one date and one whole count")
+        days = int(counts[0]) * (7 if block.endswith("weeks") else 1)
+        return dates[0] + timedelta(days=-days if block.startswith("minus") else days)
+    raise ValueError(block)
+
+
+def run_chain(blocks: list[str], values: list, rates: list[bool] | None = None):
+    """Fold the parts through the blocks. None when the counts do not line up."""
+    if len(values) < 2 or len(blocks) != len(values) - 1 or len(blocks) > MAX_STEPS:
+        return None
+    rates = list(rates or [False] * len(values))
+    acc, acc_rate = values[0], rates[0]
+    for block, x, x_rate in zip(blocks, values[1:], rates[1:]):
+        acc = apply_block(block, acc, x, acc_rate, x_rate)
+        acc_rate = False  # a computed value is never a rate
+    return acc
 
 
 def span_texts(text: str, doc_offsets: list[tuple[int, int]], spans: list[tuple[int, int]]) -> list[str]:
@@ -100,7 +176,7 @@ def execute(op: str, parts: list[str], field: dict):
     raise ValueError(op)
 
 
-NUMBER_OPS = ("read_number", "sum", "subtract", "product", "median")
+NUMBER_OPS = ("read_number", "sum", "subtract", "product", "median", "average")
 # Words that may sit next to a plain amount ("RM 32.80", "Rs 500 only").
 AMOUNT_WORDS = {"rs", "rm", "usd", "inr", "eur", "gbp", "sgd", "aud", "cad", "myr", "only"}
 MONTH_WORDS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
@@ -156,6 +232,8 @@ def _format(op: str, values: list, field: dict):
             return None
         first, second = sorted(values)
         return (second - first).days
+    if op == "average":
+        return q(sum(values, Decimal(0)) / len(values)) if len(values) >= 2 else None
     if op == "add_days":
         dates = [v for v in values if isinstance(v, date)]
         counts = [v for v in values if not isinstance(v, date)]
@@ -165,10 +243,38 @@ def _format(op: str, values: list, field: dict):
     raise ValueError(op)
 
 
-def answer(op: str, parts: list[str], field: dict, read=None, emitted=None):
+def _chain_answer(parts: list[str], field: dict, blocks, rates):
+    if blocks is None:
+        return {"missing": False, "value": None}
+    dayfirst = field.get("dayfirst", True)
+    values = []
+    try:
+        for part in parts:
+            if field["type"] == "date":
+                try:
+                    values.append(parse_date(part, dayfirst))
+                    continue
+                except Drop:
+                    pass
+            values.append(plain_number(part))
+        result = run_chain(list(blocks), values, rates)
+    except (Drop, ValueError, ArithmeticError, TypeError):
+        return {"missing": False, "value": None}
+    if result is None:
+        return {"missing": False, "value": None}
+    if field["type"] == "date":
+        return {"missing": False, "value": result.isoformat() if isinstance(result, date) else None}
+    if isinstance(result, date):
+        return {"missing": False, "value": None}
+    return {"missing": False, "value": float(quantize(result, int(field.get("decimals", 2))))}
+
+
+def answer(op: str, parts: list[str], field: dict, read=None, emitted=None, blocks=None, rates=None):
     """The final answer for one field.
 
     Missing when nothing is marked. "emit" returns what the emit head wrote.
+    "chain" folds the parts through `blocks` (with `rates`: which parts are
+    marked percentages).
     Otherwise each marked part is read by the parser; a part the parser
     cannot read (a number or date in words) goes to `read(index, kind)`, the
     learned reader, when one is given. None when a part stays unreadable.
@@ -177,7 +283,9 @@ def answer(op: str, parts: list[str], field: dict, read=None, emitted=None):
         return {"missing": True, "value": None}
     if op == "emit":
         return {"missing": False, "value": emitted}
-    if op not in NUMBER_OPS + DATE_OPS + ("add_days",):
+    if op == "chain":
+        return _chain_answer(parts, field, blocks, rates)
+    if op not in NUMBER_OPS + DATE_OPS + ("add_days", "average"):
         try:
             return {"missing": False, "value": execute(op, parts, field)}
         except (Drop, ValueError, ArithmeticError):

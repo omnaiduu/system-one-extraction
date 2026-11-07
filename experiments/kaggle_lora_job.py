@@ -68,6 +68,24 @@ def main_emit() -> None:
     run_job(layout="multi", epochs=EPOCHS, prefix="lora_emit", run_frozen=False, emit=True)
 
 
+def main_chains() -> None:
+    """Experiment 6: one pass, plus computed fields (one-step operations and two-step chains)."""
+    run_job(layout="multi", epochs=EPOCHS, prefix="lora_chains", run_frozen=False, chains=True)
+
+
+def chain_rows(rows: list[dict]) -> list[dict]:
+    """Training notes plus two copies each with one single-step and one two-step field
+    (training phrasings); exams 1-3 three times each with a held-out phrasing, as
+    dev_single, dev_combo_seen and dev_combo_unseen."""
+    from experiments.chains import test_variants, training_variants
+
+    train = [row for row in rows if row["split"] == "train"]
+    dev = [row for row in rows if row["split"] in ("exam1", "exam2", "exam3")]
+    out = list(rows) + training_variants(train, seed=11, copies=2)
+    out += [{**row, "split": f"dev_{row['chain_test']}"} for row in test_variants(dev, seed=23)]
+    return out
+
+
 def augmented_rows(rows: list[dict]) -> list[dict]:
     """Training notes plus their words and emit variants (training phrasings);
     exams 1-3 plus words and emit variants with phrasings never used in training,
@@ -83,14 +101,14 @@ def augmented_rows(rows: list[dict]) -> list[dict]:
     return out
 
 
-def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool = False) -> None:
+def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool = False, chains: bool = False) -> None:
     import torch
     import transformers
     from peft import LoraConfig, inject_adapter_in_model
 
     from experiments.evidence_data import load_rows
     from experiments.evidence_heads import Tagger
-    from experiments.lora_tagger import OpHead, assign_parts, encode, make_readers, summarize, train_lora
+    from experiments.lora_tagger import OpHead, StepHead, assign_parts, encode, make_readers, summarize, train_lora
     from experiments.lora_tagger import run_frozen as run_frozen_baselines  # not `run_frozen`: that name is the flag
 
     started = time.time()
@@ -114,6 +132,8 @@ def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool 
     rows = [row for row in load_rows() if row["split"] != "exam4"]
     if emit:
         rows = augmented_rows(rows)
+    if chains:
+        rows = chain_rows(rows)
     probe = tokenizer(rows[0]["text"], add_special_tokens=True)["input_ids"]
     with torch.no_grad():
         hidden = forward(probe)
@@ -167,17 +187,19 @@ def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool, emit: bool 
     readers = None
     if emit:
         readers = {name: r.to(device) for name, r in make_readers(len(layers), hidden[0].shape[-1]).items()}
+    step_head = StepHead(len(layers), hidden[0].shape[-1]).to(device) if chains else None
     t0 = time.time()
     result = train_lora(
         parts_by_prompt[layout], forward, adapter_params, head, layers, device,
-        epochs=epochs, set_train=lambda flag: model.train(flag), op_head=op_head, readers=readers, log=log,
+        epochs=epochs, set_train=lambda flag: model.train(flag), op_head=op_head, readers=readers, step_head=step_head, log=log,
     )
     best = result.pop("_best")
     result["seconds"] = round(time.time() - t0, 1)
     payload["results"][f"lora {layout}, {epochs} epochs"] = result
     torch.save({"adapter_names": [n for n, p in model.named_parameters() if "lora_" in n],
                 "adapter": best["adapter"], "head": best["head"], "op_head": best["heads"][1], "layers": layers,
-                "readers": dict(zip(readers, best["heads"][2:])) if readers else None,
+                "readers": dict(zip(readers, best["heads"][2 : 2 + len(readers)])) if readers else None,
+                "step_head": best["heads"][-1] if step_head is not None else None,
                 "lora": payload["lora"], "bias": best["bias"], "layout": layout}, OUT / f"{prefix}_adapter.pt")
 
     payload["seconds"] = round(time.time() - started, 1)
