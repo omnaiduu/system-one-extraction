@@ -70,7 +70,8 @@ def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool) -> None:
 
     from experiments.evidence_data import load_rows
     from experiments.evidence_heads import Tagger
-    from experiments.lora_tagger import OpHead, assign_parts, encode, run_frozen, summarize, train_lora
+    from experiments.lora_tagger import OpHead, assign_parts, encode, summarize, train_lora
+    from experiments.lora_tagger import run_frozen as run_frozen_baselines  # not `run_frozen`: that name is the flag
 
     started = time.time()
     if not torch.cuda.is_available():
@@ -112,7 +113,7 @@ def run_job(layout: str, epochs: int, prefix: str, run_frozen: bool) -> None:
     for prompt in (("last_nobos", "first") if run_frozen else ()):
         t0 = time.time()
         log(f"frozen {prompt}")
-        result = run_frozen(parts_by_prompt[prompt], forward, layers, device, log=log)
+        result = run_frozen_baselines(parts_by_prompt[prompt], forward, layers, device, log=log)
         result["seconds"] = round(time.time() - t0, 1)
         payload["results"][f"frozen {prompt}"] = result
         log(f"frozen {prompt} done: held {result['held']['exact']}/{result['held']['fields']}")
