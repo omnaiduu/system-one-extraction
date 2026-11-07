@@ -16,7 +16,8 @@ The older notes are still true for their era and are worth reading after this: `
 | Does letting Gemma learn (LoRA) help? | Yes, by a lot. Evidence exactly right on never-seen exams went from 116/293 (40%) to 195/293 (67%). | [06](06-experiment-2-lora.md) |
 | Is the LoRA model memorizing? | No sign of it. It fits training notes slightly worse than the frozen tagger (273/300 vs 300/300) and new notes much better. | [06](06-experiment-2-lora.md) |
 | Final answers (the actual fee, the actual due date)? | **226/293 (77%) on exams 1–3**, against 139/293 for the marking test with its hand rules. Operation choice 102/103. | [07](07-experiment-3-final-answers.md) |
-| All fields in one pass, and confidence scores? | Running (kernel `ommnaidu/gemma-e2b-lora-onepass`). | [12](12-one-pass-confidence-and-real-receipts.md) |
+| All fields in one pass, and confidence scores? | **223/293**, within noise of one forward per field, 3× faster. Confidence AUROC 0.861; answers at ≥0.99 confidence are 194/212 right. | [12](12-one-pass-confidence-and-real-receipts.md) |
+| Can the model *emit* values that are not on the page, and read numbers written in words? | **No, not with a learned head.** Emit 0/72 (0/50 within 1%); the words reader is unreliable; joint training hurt marking (223 → 181; detached 205). The operation head does recognize emit questions (103/103). | [13](13-reader-and-emit.md) |
 | Real documents? | SROIE test receipts, zero-shot, prepared; scored together with exam 4 in the final grade. | [12](12-one-pass-confidence-and-real-receipts.md) |
 | Exam 4? | Not touched. It is kept for one final grade. | [10](10-next-steps.md) |
 | Real customer mail? | None on disk. SROIE receipts are the real-document test. | [09](09-blog-draft.md) |
@@ -35,6 +36,7 @@ The older notes are still true for their era and are worth reading after this: `
 10. [10 — Next steps and open questions](10-next-steps.md)
 11. [11 — Decision log](11-decision-log.md): every decision in order, including the wrong turns.
 12. [12 — One pass, confidence, and real receipts](12-one-pass-confidence-and-real-receipts.md)
+13. [13 — The learned reader and the emit head](13-reader-and-emit.md): what was built, why it failed, what to do instead
 
 ## Ground rules that still hold
 
