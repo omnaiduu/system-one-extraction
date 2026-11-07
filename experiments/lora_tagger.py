@@ -38,6 +38,7 @@ from experiments.evidence_data import (
     span_to_tokens,
 )
 from experiments.evidence_heads import TAG_WEIGHTS, Tagger, _batch, folds_for, score, train_tagger
+from experiments.values import ALLOWED, OPS, answer, matches, span_texts
 
 SEED = 7
 BIASES = (-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0)
@@ -65,15 +66,21 @@ def encode(rows: list[dict], tokenizer, prompt: str) -> list[dict]:
                 if row["text"][start:end].strip() not in covered:
                     raise RuntimeError(f"{row['id']} {question['field']}: tokens miss the gold words")
                 gold.append((first, last))
+            ids = list(encoded["input_ids"])
             examples.append(
                 {
                     **{k: question[k] for k in ("doc", "field", "type", "op")},
                     "split": row["split"],
-                    "ids": list(encoded["input_ids"]),
+                    "ids": ids,
                     "doc_index": doc_index,
                     "q_index": last_token_inside(offsets, *q_spans[0]),
+                    "end_index": len(ids) - 1,
                     "tags": torch.tensor(bio_tags(len(doc_index), gold), dtype=torch.long),
                     "gold": gold,
+                    "op_index": OPS.index(question["op"]) if question["op"] in OPS else -1,
+                    "text": row["text"],
+                    "doc_offsets": doc_offsets,
+                    "spec": row["fields"][question["field"]],
                 }
             )
     return examples
@@ -180,25 +187,113 @@ def run_frozen(parts: dict, forward, layers: list[int], device: str, epochs: int
     return result
 
 
+# ---- operation head and final answers ----------------------------------------
+
+
+class OpHead(torch.nn.Module):
+    """Which operation turns the marked parts into the answer.
+
+    Reads the last question token and the last prompt token (which, question
+    first, has read the whole note).
+    """
+
+    def __init__(self, layers: int, width: int, inner: int = 128) -> None:
+        super().__init__()
+        self.mix = torch.nn.Parameter(torch.zeros(layers))
+        self.norm = torch.nn.LayerNorm(2 * width)
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(2 * width, inner), torch.nn.GELU(), torch.nn.Dropout(0.1), torch.nn.Linear(inner, len(OPS))
+        )
+
+    def forward(self, question: torch.Tensor, end: torch.Tensor) -> torch.Tensor:
+        weights = torch.softmax(self.mix, 0)
+        q = torch.einsum("k,bkh->bh", weights, F.layer_norm(question, question.shape[-1:]))
+        e = torch.einsum("k,bkh->bh", weights, F.layer_norm(end, end.shape[-1:]))
+        return self.net(self.norm(torch.cat([q, e], dim=-1)))
+
+
+def choose_op(ex: dict, op_logits: torch.Tensor | None) -> str:
+    allowed = ALLOWED[ex["type"]]
+    if len(allowed) == 1 or op_logits is None:
+        return allowed[0]
+    return max(allowed, key=lambda op: float(op_logits[OPS.index(op)]))
+
+
+def final_answer(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float):
+    spans = decode(tag_logits, bias)
+    op = choose_op(ex, op_logits)
+    predicted = answer(op, span_texts(ex["text"], ex["doc_offsets"], spans), ex["spec"])
+    return spans, op, predicted
+
+
+def value_report(examples, tag_logits, op_logits, bias, keep_examples: int = 0) -> dict:
+    from collections import Counter, defaultdict
+
+    hits, by_op = Counter(), defaultdict(Counter)
+    op_right = op_total = 0
+    kept = []
+    for index, ex in enumerate(examples):
+        spans, op, predicted = final_answer(ex, tag_logits[index], op_logits[index], bias)
+        ok = matches(ex["spec"], predicted)
+        hits[ok] += 1
+        by_op[ex["op"]][ok] += 1
+        if ex["op"] in OPS and len(ALLOWED[ex["type"]]) > 1:
+            op_total += 1
+            op_right += op == ex["op"]
+        if len(kept) < keep_examples:
+            kept.append({"doc": ex["doc"], "field": ex["field"], "gold_op": ex["op"], "op": op,
+                         "gold": ex["spec"].get("value"), "predicted": predicted["value"],
+                         "missing": predicted["missing"], "right": ok})
+    out = {
+        "fields": len(examples),
+        "exact": hits[True],
+        "by_op": {op: f"{c[True]}/{c[True] + c[False]}" for op, c in sorted(by_op.items())},
+        "op_choice": f"{op_right}/{op_total}",
+    }
+    if keep_examples:
+        out["examples"] = kept
+    return out
+
+
+def pick_bias_by_value(examples, tag_logits, op_logits) -> tuple[float, dict]:
+    table = {}
+    for b in BIASES:
+        table[b] = (
+            value_report(examples, tag_logits, op_logits, b)["exact"],
+            score_logits(examples, tag_logits, b)["exact"],
+        )
+    best = max(BIASES, key=lambda b: (table[b], -abs(b)))
+    return best, table
+
+
 # ---- LoRA -------------------------------------------------------------------
 
 
 def _example_states(forward, ex: dict, layers: list[int]):
     hidden = forward(ex["ids"])
     stacked = torch.stack([hidden[i][0] for i in layers]).float()
-    return stacked[:, ex["doc_index"]].unsqueeze(0), stacked[:, ex["q_index"]].unsqueeze(0)
+    return (
+        stacked[:, ex["doc_index"]].unsqueeze(0),
+        stacked[:, ex["q_index"]].unsqueeze(0),
+        stacked[:, ex["end_index"]].unsqueeze(0),
+    )
 
 
-def lora_logits(forward, head: Tagger, examples: list[dict], layers: list[int], autocast) -> list[torch.Tensor]:
+def lora_logits(forward, head: Tagger, op_head, examples: list[dict], layers: list[int], autocast):
+    """Tag logits and operation logits for each example."""
     head.eval()
-    out = []
+    if op_head is not None:
+        op_head.eval()
+    tags, ops = [], []
     with torch.no_grad():
         for ex in examples:
             with autocast():
-                doc, question = _example_states(forward, ex, layers)
+                doc, question, end = _example_states(forward, ex, layers)
                 logits = head(doc, question)
-            out.append(logits[0].float().cpu())
-    return out
+                op_logits = op_head(question, end) if op_head is not None else None
+            tags.append(logits[0].float().cpu())
+            ops.append(None if op_logits is None else op_logits[0].float().cpu())
+    return tags, ops
 
 
 def train_lora(
@@ -214,13 +309,20 @@ def train_lora(
     lr_head: float = 1e-3,
     use_amp: bool = True,
     set_train=lambda flag: None,
+    op_head: OpHead | None = None,
     log=print,
 ) -> dict:
-    """Train adapters and head together; keep the epoch best on `held`."""
+    """Train adapters, tagger and operation head together.
+
+    The epoch and the decode bias are the ones with the most right final
+    answers on `held` (ties: most exact evidence).
+    """
     rng = random.Random(SEED)
     torch.manual_seed(SEED)
+    heads = [head] + ([op_head] if op_head is not None else [])
+    head_params = [p for h in heads for p in h.parameters()]
     optimizer = torch.optim.AdamW(
-        [{"params": adapter_params, "lr": lr_adapter}, {"params": head.parameters(), "lr": lr_head}],
+        [{"params": adapter_params, "lr": lr_adapter}, {"params": head_params, "lr": lr_head}],
         weight_decay=0.01,
     )
     amp = use_amp and device.startswith("cuda")
@@ -234,15 +336,19 @@ def train_lora(
     history, best = [], None
     for epoch in range(1, epochs + 1):
         set_train(True)
-        head.train()
+        for h in heads:
+            h.train()
         rng.shuffle(fit)
         total, skipped = 0.0, 0
         optimizer.zero_grad()
         for step, ex in enumerate(fit, start=1):
             with autocast():
-                doc, question = _example_states(forward, ex, layers)
+                doc, question, end = _example_states(forward, ex, layers)
                 logits = head(doc, question)
+                op_logits = op_head(question, end) if op_head is not None else None
             loss = F.cross_entropy(logits[0].float(), ex["tags"].to(device), weight=weights)
+            if op_logits is not None and ex.get("op_index", -1) >= 0:
+                loss = loss + F.cross_entropy(op_logits.float(), torch.tensor([ex["op_index"]], device=device))
             if not torch.isfinite(loss):
                 skipped += 1
                 continue
@@ -250,38 +356,44 @@ def train_lora(
             total += float(loss.detach())
             if step % accumulate == 0 or step == len(fit):
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(adapter_params + list(head.parameters()), 1.0)
+                torch.nn.utils.clip_grad_norm_(adapter_params + head_params, 1.0)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
             if step % 200 == 0:
                 log(f"  lora epoch {epoch} step {step}/{len(fit)} loss {total / step:.4f}")
         set_train(False)
-        held_logits = lora_logits(forward, head, parts["held"], layers, autocast)
-        bias, table = pick_bias(parts["held"], held_logits)
+        tag_l, op_l = lora_logits(forward, head, op_head, parts["held"], layers, autocast)
+        bias, table = pick_bias_by_value(parts["held"], tag_l, op_l)
         row = {"epoch": epoch, "train_loss": total / max(1, len(fit) - skipped), "skipped": skipped,
-               "held_exact_at_0": table[0.0], "held_exact_best_bias": table[bias], "bias": bias}
+               "bias": bias, "held_value_exact": table[bias][0], "held_span_exact": table[bias][1],
+               "held_span_exact_at_0": table[0.0][1]}
         history.append(row)
         log(f"  lora epoch {epoch}: {row}")
         if best is None or table[bias] > best["held"]:
             best = {
                 "epoch": epoch, "bias": bias, "held": table[bias],
                 "adapter": [p.detach().cpu().clone() for p in adapter_params],
-                "head": {k: v.detach().cpu().clone() for k, v in head.state_dict().items()},
+                "heads": [{k: v.detach().cpu().clone() for k, v in h.state_dict().items()} for h in heads],
             }
     with torch.no_grad():
         for param, saved in zip(adapter_params, best["adapter"]):
             param.copy_(saved.to(param.device))
-    head.load_state_dict(best["head"])
+    for h, saved in zip(heads, best["heads"]):
+        h.load_state_dict(saved)
+    best["head"] = best["heads"][0]
     set_train(False)
-    result = {"epoch": best["epoch"], "bias": best["bias"], "history": history}
-    result["held"] = report_part(parts["held"], lora_logits(forward, head, parts["held"], layers, autocast), best["bias"])
-    sample = parts["fit"][:300]
-    result["fit_sample"] = report_part(sample, lora_logits(forward, head, sample, layers, autocast), best["bias"])
+    result = {"epoch": best["epoch"], "bias": best["bias"], "history": history, "values": {}}
+
+    def both(name, examples, keep):
+        tag_l, op_l = lora_logits(forward, head, op_head, examples, layers, autocast)
+        result[name] = report_part(examples, tag_l, best["bias"], keep_examples=keep)
+        result["values"][name] = value_report(examples, tag_l, op_l, best["bias"], keep_examples=keep)
+
+    both("held", parts["held"], 0)
+    both("fit_sample", parts["fit"][:300], 0)
     for name in DEV:
-        result[name] = report_part(
-            parts[name], lora_logits(forward, head, parts[name], layers, autocast), best["bias"], keep_examples=200
-        )
+        both(name, parts[name], 200)
     result["_best"] = best
     return result
 
@@ -310,7 +422,32 @@ def summarize(payload: dict) -> str:
             + " | ".join(f"{res[d]['exact']}/{res[d]['fields']}" for d in DEV)
             + f" | {dev_exact}/{dev_total} | {buckets['wrong_place']} | {buckets['missed']} | {buckets['partial']} |"
         )
-    lines += ["", "## Exams 1-3 by operation (exact / fields)", ""]
+    valued = {name: res for name, res in payload["results"].items() if res.get("values")}
+    if valued:
+        lines += ["", "## Final answers (marked words, read and combined)", ""]
+        lines.append("| Condition | Fit sample | Held | Exam 1 | Exam 2 | Exam 3 | Exams 1-3 | Operation choice, exams 1-3 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        for name, res in valued.items():
+            v = res["values"]
+            right = sum(v[d]["exact"] for d in DEV)
+            total = sum(v[d]["fields"] for d in DEV)
+            op_r = sum(int(v[d]["op_choice"].split("/")[0]) for d in DEV)
+            op_t = sum(int(v[d]["op_choice"].split("/")[1]) for d in DEV)
+            lines.append(
+                f"| {name} | {v['fit_sample']['exact']}/{v['fit_sample']['fields']} | {v['held']['exact']}/{v['held']['fields']} | "
+                + " | ".join(f"{v[d]['exact']}/{v[d]['fields']}" for d in DEV)
+                + f" | {right}/{total} | {op_r}/{op_t} |"
+            )
+        lines += ["", "Final answers by operation, exams 1-3:", ""]
+        for name, res in valued.items():
+            merged = {}
+            for d in DEV:
+                for op, cell in res["values"][d]["by_op"].items():
+                    a, b = map(int, cell.split("/"))
+                    x, y = merged.get(op, (0, 0))
+                    merged[op] = (x + a, y + b)
+            lines.append(f"- {name}: " + ", ".join(f"{op} {a}/{b}" for op, (a, b) in sorted(merged.items())))
+    lines += ["", "## Evidence on exams 1-3 by operation (exact / fields)", ""]
     names = list(payload["results"])
     ops = sorted({op for res in payload["results"].values() for d in DEV for op in res[d]["by_op"]})
     lines.append("| Operation | " + " | ".join(names) + " |")

@@ -22,7 +22,9 @@ MODEL = "google/gemma-4-E2B-it"
 OUT = Path("/kaggle/working")
 RANK = 16
 ALPHA = 32
-EPOCHS = 5
+EPOCHS = 10
+# The frozen baselines were measured in the previous run (outputs/experiments/lora_results.md).
+RUN_FROZEN = False
 
 
 def log(message: str) -> None:
@@ -58,7 +60,7 @@ def main() -> None:
 
     from experiments.evidence_data import load_rows
     from experiments.evidence_heads import Tagger
-    from experiments.lora_tagger import assign_parts, encode, run_frozen, summarize, train_lora
+    from experiments.lora_tagger import OpHead, assign_parts, encode, run_frozen, summarize, train_lora
 
     started = time.time()
     if not torch.cuda.is_available():
@@ -90,13 +92,13 @@ def main() -> None:
 
     payload = {"model": MODEL, "dtype": "float16", "layers": layers, "results": {}}
     parts_by_prompt = {}
-    for prompt in ("last_nobos", "first"):
+    for prompt in (("last_nobos", "first") if RUN_FROZEN else ("first",)):
         parts_by_prompt[prompt] = assign_parts(encode(rows, tokenizer, prompt))
     sizes = {name: len(part) for name, part in parts_by_prompt["first"].items()}
     payload["sizes"] = sizes
     log(f"split sizes {sizes}")
 
-    for prompt in ("last_nobos", "first"):
+    for prompt in (("last_nobos", "first") if RUN_FROZEN else ()):
         t0 = time.time()
         log(f"frozen {prompt}")
         result = run_frozen(parts_by_prompt[prompt], forward, layers, device, log=log)
@@ -127,16 +129,17 @@ def main() -> None:
     log(f"lora on {len(targets)} modules, {payload['lora']['params']} trainable parameters")
 
     head = Tagger(len(layers), hidden[0].shape[-1]).to(device)
+    op_head = OpHead(len(layers), hidden[0].shape[-1]).to(device)
     t0 = time.time()
     result = train_lora(
         parts_by_prompt["first"], forward, adapter_params, head, layers, device,
-        epochs=EPOCHS, set_train=lambda flag: model.train(flag), log=log,
+        epochs=EPOCHS, set_train=lambda flag: model.train(flag), op_head=op_head, log=log,
     )
     best = result.pop("_best")
     result["seconds"] = round(time.time() - t0, 1)
-    payload["results"]["lora first"] = result
+    payload["results"][f"lora first, {EPOCHS} epochs"] = result
     torch.save({"adapter_names": [n for n, p in model.named_parameters() if "lora_" in n],
-                "adapter": best["adapter"], "head": best["head"], "layers": layers,
+                "adapter": best["adapter"], "head": best["head"], "op_head": best["heads"][1], "layers": layers,
                 "lora": payload["lora"], "bias": best["bias"]}, OUT / "lora_adapter.pt")
 
     payload["seconds"] = round(time.time() - started, 1)

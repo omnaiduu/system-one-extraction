@@ -119,3 +119,51 @@ def test_peft_injects_only_text_attention():
     model = inject_adapter_in_model(LoraConfig(r=4, lora_alpha=8, target_modules=targets), model)
     lora_names = [n for n, _ in model.named_parameters() if "lora_" in n]
     assert lora_names and all("language_model" in n for n in lora_names)
+
+
+def test_gold_evidence_reproduces_every_gold_answer():
+    from experiments.evidence_data import field_evidence, field_operation
+    from experiments.values import ALLOWED, answer, matches
+
+    checked = 0
+    for row in load_rows():
+        if row["split"] == "exam4":
+            continue
+        for field in row["fields"].values():
+            spans = field_evidence(field)
+            if spans is None:
+                continue
+            op = field_operation(field)
+            assert op == "missing" or op in ALLOWED[field["type"]]
+            parts = [row["text"][a:b].strip() for a, b in spans]
+            assert matches(field, answer(ALLOWED[field["type"]][0] if op == "missing" else op, parts, field))
+            checked += 1
+    assert checked == 1309
+
+
+def test_wrong_parts_give_a_wrong_answer():
+    from experiments.values import answer, matches
+
+    field = {"type": "number", "value": 618.55, "decimals": 2, "missing": False}
+    assert matches(field, answer("sum", ["418.30", "126.85", "73.40"], field))
+    assert not matches(field, answer("sum", ["418.30", "126.85"], field))
+    assert not matches(field, answer("product", ["418.30", "126.85"], field))
+    assert not matches(field, answer("sum", [], field))
+    assert matches({"type": "text", "value": None, "missing": True}, answer("copy", [], {}))
+
+
+def test_lora_with_operation_head_reports_final_answers():
+    from experiments.lora_tagger import OpHead
+
+    parts = _parts()
+    tower = FakeTower()
+    layers = [1, 2]
+    head, op_head = Tagger(len(layers), 16), OpHead(len(layers), 16)
+    result = lora_tagger.train_lora(parts, tower, [tower.adapter], head, layers, "cpu", epochs=1,
+                                    accumulate=2, use_amp=False, op_head=op_head, log=lambda *_: None)
+    best = result.pop("_best")
+    assert len(best["heads"]) == 2
+    for name in ("held", "fit_sample") + lora_tagger.DEV:
+        assert result["values"][name]["fields"] == result[name]["fields"]
+    text = lora_tagger.summarize({"model": "fake", "results": {"lora": result}})
+    assert "## Final answers" in text
