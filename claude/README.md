@@ -22,7 +22,8 @@ The older notes are still true for their era and are worth reading after this: `
 | Can the model *emit* values that are not on the page, and read numbers written in words? | **No, not with a learned head.** Emit 0/72 (0/50 within 1%); the words reader is unreliable; joint training hurt marking (223 → 181; detached 205). The operation head does recognize emit questions (103/103). | [13](13-reader-and-emit.md) |
 | Can it compute values that are not printed, from facts that are (percent off, average, date minus weeks, two-step chains)? | **On training wording, yes**: 152/168, blocks 137/137. On new wording, one step 39/72; two steps 9/72 (trained combinations) and 4/72 (new combinations). Marking new sentences and composing blocks are the gaps; the arithmetic never is. | [16](16-computed-fields-and-chains.md) |
 | Is an untrained LLM with structured output better? | **At reading, yes.** Same Gemma 4 E2B, no training, JSON: 250/293 on exams 1–3 (ours 223), words 216/287 (ours 147), SROIE receipts 1,109/1,362. **At computing, no**: one-step 22/72 (ours 39), two-step 2/72 and 0/72 (ours 9 and 4). And 34× slower (4.65 s against 0.14 s a note). Points to: LLM reads, code computes. | [17](17-structured-output-baseline.md) |
-| Real documents? | SROIE test receipts, zero-shot, prepared; scored together with exam 4 in the final grade. | [12](12-one-pass-confidence-and-real-receipts.md) |
+| LLM reads, code computes? | **Best on every test.** The LLM gives inputs and steps; our `values` code computes. Exams 1–3 252/293, one-step 43/72, two-step 21/72 and 26/72 (ours 39, 9, 4), words 227/287, receipts 1,120/1,362. About 5 s a note. | [18](18-llm-reads-code-computes.md) |
+| Real documents? | **Our system fails on them.** SROIE test receipts, zero-shot: ours 66/1,362 (5%); untrained Gemma with JSON and code for arithmetic 1,120/1,362 (82%). The same run scored exams 1–3 at 223/293, so it is not a loading bug. | [18](18-llm-reads-code-computes.md) |
 | Exam 4? | Not touched. It is kept for one final grade. | [10](10-next-steps.md) |
 | Real customer mail? | None on disk. SROIE receipts are the real-document test. | [09](09-blog-draft.md) |
 
@@ -45,6 +46,7 @@ The older notes are still true for their era and are worth reading after this: `
 15. [15 — Compared with Cloudflare's Clairic](15-compared-with-cloudflare.md): capability by capability, and what would close the gap
 16. [16 — Experiment 6: computed fields and chains](16-computed-fields-and-chains.md): exact one-step operations and two-step chains; what worked (the arithmetic, the choices on trained wording) and what did not (new wording, composing)
 17. [17 — The structured-output baseline](17-structured-output-baseline.md): untrained Gemma writing JSON, against our system; it reads better, computes worse, and is 34× slower
+18. [18 — LLM reads, code computes](18-llm-reads-code-computes.md): the LLM gives inputs and steps, code computes; it beats our system everywhere, and our system scores 5% on real receipts
 
 ## Ground rules that still hold
 

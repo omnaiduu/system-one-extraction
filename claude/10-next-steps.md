@@ -1,6 +1,14 @@
 # 10 — Next steps and open questions
 
-Current best model: **experiment 4**, one pass per note (`outputs/experiments/lora_onepass_adapter.pt`, kernel `ommnaidu/gemma-e2b-lora-onepass`), 223/293 final answers on exams 1–3.
+**Current best system: LLM reads, code computes** (note 18): untrained Gemma 4 E2B with `SYSTEM_CALC`, calculated values computed by `values`. 252/293 on exams 1–3, 1,120/1,362 on SROIE. Our best trained model (experiment 4, 223/293) scores 66/1,362 on real receipts and is no longer the recommendation.
+
+## 0. What to do next, in order
+
+1. Make the hybrid follow its own rule: schema-constrained decoding (get lm-format-enforcer or outlines working with Gemma 4's tokenizer) so a calculated date cannot come back as a literal date (38 of 39 rule breaks were dates), and a single-step form for median and average.
+2. Exam 4, once, with the hybrid and experiment 4 side by side.
+3. If cost matters (about 5 s a note against 0.14 s), distill: run the hybrid over real documents and train the small tagger on its answers, then measure on documents of a kind it never saw. Synthetic notes alone do not transfer (note 18).
+
+The sections below are the older plan for the trained system.
 
 ## 1. Make computed fields generalize (recommended next)
 

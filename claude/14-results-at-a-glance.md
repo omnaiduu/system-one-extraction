@@ -77,9 +77,25 @@ Answers never printed; facts marked, blocks chosen by the step head, arithmetic 
 
 Main failures: amounts clipped or parts missed on new sentence shapes (only 26 training templates), and the step head learning whole pairs rather than blocks. Details in [16](16-computed-fields-and-chains.md).
 
+## Untrained LLM baselines (notes 17 and 18)
+
+Same Gemma 4 E2B, no training, JSON output, system prompt with worked examples. "Code computes": calculated values come back as inputs and steps and are computed by `values`.
+
+| Part | LLM computes | LLM reads, code computes | Our system |
+| --- | --- | --- | --- |
+| Exams 1–3 (293) | 250 | **252** | 223 |
+| One step, new wording (72) | 22 | **43** | 39 |
+| Two steps, trained combination (72) | 2 | **21** | 9 |
+| Two steps, new combination (72) | 0 | **26** | 4 |
+| Numbers and dates in words (287) | 216 | **227** | 147 |
+| SROIE receipts (1,362) | 1,109 | **1,120** | 66 |
+| Seconds per note, T4 | 4.65 | 4.93 | 0.14 (0.17 per receipt) |
+
+SROIE by field, LLM reads and code computes against ours: company 239 / 3, date 314 / 63, address 304 / 0, total 263 / 0.
+
 ## Cost and time
 
-Everything ran on Kaggle's free T4s. Experiment 1: 39 min. Experiment 2: 50 min (plus an 11-minute failed attempt). Experiment 3: 78 min. Experiment 4: 26 min. Experiments 5a and 5b: 55 min each. Experiment 6: 55 min. No money was spent anywhere.
+Everything ran on Kaggle's free T4s. Experiment 1: 39 min. Experiment 2: 50 min (plus an 11-minute failed attempt). Experiment 3: 78 min. Experiment 4: 26 min. Experiments 5a and 5b: 55 min each. Experiment 6: 55 min. Structured baseline: 62 min. LLM reads, code computes: 59 min, plus 4 min for our system on SROIE. No money was spent anywhere.
 
 ## Settings shared by the LoRA runs
 

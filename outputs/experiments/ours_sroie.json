@@ -1,0 +1,97 @@
+{
+  "receipts": 347,
+  "skipped": {
+    "address:not_in_text": 15,
+    "company:not_in_text": 6,
+    "date:not_in_text": 4,
+    "date:unreadable_label": 1
+  },
+  "ours": {
+    "overall": {
+      "fields": 1362,
+      "found": 68,
+      "value": 66,
+      "value_wide_dates": 74
+    },
+    "by_field": {
+      "company": {
+        "fields": 341,
+        "found": 3,
+        "value": 3,
+        "value_wide_dates": 3
+      },
+      "date": {
+        "fields": 342,
+        "found": 65,
+        "value": 63,
+        "value_wide_dates": 71
+      },
+      "address": {
+        "fields": 332,
+        "found": 0,
+        "value": 0,
+        "value_wide_dates": 0
+      },
+      "total": {
+        "fields": 347,
+        "found": 0,
+        "value": 0,
+        "value_wide_dates": 0
+      }
+    },
+    "confidence": {
+      "thresholds": {
+        "0.5": {
+          "kept": 1361,
+          "right": 74
+        },
+        "0.7": {
+          "kept": 1294,
+          "right": 74
+        },
+        "0.8": {
+          "kept": 874,
+          "right": 72
+        },
+        "0.9": {
+          "kept": 665,
+          "right": 72
+        },
+        "0.95": {
+          "kept": 577,
+          "right": 70
+        },
+        "0.99": {
+          "kept": 426,
+          "right": 67
+        }
+      },
+      "auroc": 0.9362934362934363,
+      "fields": 1362
+    },
+    "seconds_per_receipt": 0.207,
+    "layout": "multi",
+    "exams1-3": {
+      "fields": 293,
+      "exact": 223,
+      "by_op": {
+        "add_days": "3/6",
+        "copy": "66/95",
+        "days_between": "12/14",
+        "list": "15/37",
+        "median": "5/9",
+        "missing": "29/29",
+        "product": "9/11",
+        "read_date": "54/60",
+        "read_datetime": "3/3",
+        "read_number": "7/9",
+        "read_time": "3/3",
+        "subtract": "7/7",
+        "sum": "10/10"
+      },
+      "op_choice": "102/103"
+    }
+  },
+  "seconds": 192.1,
+  "note": "Receipt-level examples removed: SROIE data is not committed."
+}

@@ -97,3 +97,12 @@ def test_only_the_final_kernel_bundles_exam4(tmp_path):
     assert meta["kernel_sources"] == ["ommnaidu/gemma-e2b-lora-onepass"]
     assert meta["dataset_sources"] == ["urbikn/sroie-datasetv2"]
     assert "kaggle_final_job import main as main" in final.read_text()
+
+
+def test_no_receipt_data_in_committed_outputs():
+    """SROIE has no licence for redistribution: results may hold scores, never receipt text or labels."""
+    from pathlib import Path
+
+    for path in (Path(__file__).resolve().parents[1] / "outputs").rglob("*"):
+        if path.is_file() and path.suffix in (".json", ".md"):
+            assert "sroie-X" not in path.read_text(encoding="utf-8", errors="replace"), path

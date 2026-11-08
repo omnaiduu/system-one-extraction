@@ -21,7 +21,7 @@ The user's challenge: "This is not prod ready; we are tuning for a dataset; an L
 | Computed, one step, new wording (72) | 22/72 | **39/72** (experiment 6) |
 | Computed, two steps, trained combination | 2/72 | **9/72** |
 | Computed, two steps, new combination | 0/72 | **4/72** |
-| SROIE real receipts (1,362 fields) | 1,109/1,362 (81%) | not run |
+| SROIE real receipts (1,362 fields) | 1,109/1,362 (81%) | 66/1,362 (5%), measured later ([18](18-llm-reads-code-computes.md)) |
 | Time per note on a T4 | 4.65 s (56 new tokens) | **0.14 s** (one forward), about 34× faster |
 
 By operation on exams 1–3 (baseline, system prompt; ours from experiment 4 in brackets): copy 87/95 (66), read_date 60/60 (54), read_number 9/9 (7), missing 29/29 (29), sum 9/10 (10), subtract 6/7 (7), add_days 5/6, product 6/11 (9–10), days_between 10/14 (12–14), list 22/37 (15–18), median 1/9 (5).
