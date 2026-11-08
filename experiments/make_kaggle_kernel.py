@@ -1,6 +1,6 @@
 """Pack the experiment into one Kaggle kernel script.
 
-    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora|lora_onepass|lora_emit|lora_chains|lora_grammar|structured|final SOURCE_KERNEL]
+    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora|lora_onepass|lora_emit|lora_chains|lora_grammar|structured|hybrid SOURCE_KERNEL|final SOURCE_KERNEL]
     kaggle kernels push -p OUT_DIR
 
 The kernel script carries the raw writer files, `extractor/`, and
@@ -29,6 +29,8 @@ JOBS = {
     "lora_grammar": ("ommnaidu/gemma-e2b-lora-grammar", "Gemma E2B LoRA grammar", "experiments.kaggle_lora_job", "main_grammar"),
     # The untrained baseline: same Gemma, JSON constrained to a schema. Reads SROIE; no exam 4.
     "structured": ("ommnaidu/gemma-e2b-structured", "Gemma E2B structured", "experiments.kaggle_structured_job", "main"),
+    # LLM reads, code computes; plus our experiment-4 model on SROIE. Needs the model kernel as a source.
+    "hybrid": ("ommnaidu/gemma-e2b-hybrid", "Gemma E2B hybrid", "experiments.kaggle_hybrid_job", "main"),
     # The final grade. The only job whose bundle contains exam 4. Needs the
     # trained model's kernel as a source: make_kaggle_kernel.py OUT final SOURCE_KERNEL
     "final": ("ommnaidu/gemma-e2b-final-grade", "Gemma E2B final grade", "experiments.kaggle_final_job", "main"),
@@ -98,8 +100,8 @@ def write_kernel(out_dir: Path, job: str = "question_order", source_kernel: str 
         "enable_tpu": False,
         "enable_internet": True,
         "keywords": [],
-        "dataset_sources": [SROIE_DATASET] if final or job == "structured" else [],
-        "kernel_sources": [source_kernel] if final else [],
+        "dataset_sources": [SROIE_DATASET] if final or job in ("structured", "hybrid") else [],
+        "kernel_sources": [source_kernel] if source_kernel and job in ("final", "hybrid") else [],
         "competition_sources": [],
         "model_sources": [],
         "machine_shape": "NvidiaTeslaT4",

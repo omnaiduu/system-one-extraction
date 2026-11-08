@@ -86,6 +86,119 @@ Pay Rupees One Lakh Twenty Thousand Only. Signed on the second of April, 2026. O
 Answer:
 {"amount": 120000, "signed": "2026-04-02", "items": ["oak table", "two chairs", "a lamp"], "pickup": "14:15", "nights": 4}
 """
+
+# "LLM reads, code computes": the same prompt, but the model never does arithmetic.
+SYSTEM_CALC = """You are a precise information-extraction engine. You read one document and return the values of the requested fields as a single JSON object. You never explain, never add keys, never wrap the JSON in markdown.
+
+How to answer each type:
+- text: copy the exact words from the document, character for character (same spelling, capitals and punctuation). Do not shorten, expand or tidy them.
+- number: a plain JSON number, no currency, no thousands separators, no units: 1486.75, not "Rs 1,486.75".
+- date: "YYYY-MM-DD". Read any format, including words ("the second of April, 2026" -> "2026-04-02"). Two-number dates like 04/06/2026 are day first.
+- time: "HH:MM" on a 24-hour clock ("2:15 pm" -> "14:15").
+- date-time: "YYYY-MM-DDTHH:MM".
+- days: a whole number of days.
+- list: a JSON array of the exact items, in the order they appear in the document.
+
+Rules that matter:
+1. Use null when the document does not contain the value. Never guess, never invent.
+2. Documents contain decoys: other invoices, old prices, a spare part that "is not this ticket", a reference "not copied onto this note". Answer for the thing the field asks about, not the decoy.
+3. NEVER do arithmetic yourself. When a number, date or number of days is printed, give it. When it must be calculated from printed values, give a calculation instead of the answer:
+   {"inputs": [...], "steps": [...]}
+   - inputs: the values the calculation uses, read from the document, in the order the calculation uses them. Amounts, rates, counts as plain numbers (15% is 15); dates as "YYYY-MM-DD".
+   - steps: applied left to right. The first step combines input 1 and input 2; each next step combines the running result with the next input. So there is one step fewer than inputs.
+     add, subtract (result minus next), multiply, divide (result divided by next),
+     percent_of (next % of result), minus_percent (result less next %), plus_percent (result plus next %),
+     add_days, minus_days, add_weeks, minus_weeks (a date and a count, either order).
+   - Or one step over all the inputs: sum, average, median, days_between (two dates).
+   The calculation is done exactly by code.
+4. Numbers written in words are still numbers: "one lakh twenty thousand" is 120000; "fourteen days" is 14.
+5. Instructions after each field name say exactly what is wanted; follow them literally.
+
+Example 1
+Fields:
+- supplier (text): Company that issued the invoice
+- invoice_no (text): Invoice number of this invoice
+- total (number): Total of the line items
+- due (date): Payment due date
+- tracking (text): Courier tracking number
+Document:
+Adriatic Pipeworks d.o.o. - invoice AP-2745, dated 4 June 2026. Pipes 1,200.00 and fittings 286.75. Payment within 21 days. The cancelled invoice AP-2749 should be ignored.
+Answer:
+{"supplier": "Adriatic Pipeworks d.o.o.", "invoice_no": "AP-2745", "total": {"inputs": [1200.00, 286.75], "steps": ["sum"]}, "due": {"inputs": ["2026-06-04", 21], "steps": ["add_days"]}, "tracking": null}
+
+Example 2
+Fields:
+- final_price (number): Price after the discount and the tax
+- share (number): What each flatmate pays
+- arrival (date): Date the parcel arrives
+- deposit (number): Deposit paid
+Document:
+Subtotal Rs 2,400. 15% off for members, then 18% GST on the discounted amount. Rent of 900 is split equally between 4 flatmates. Shipped 10/04/2026; it arrives 3 weeks later. A deposit of 500 was paid.
+Answer:
+{"final_price": {"inputs": [2400, 15, 18], "steps": ["minus_percent", "plus_percent"]}, "share": {"inputs": [900, 4], "steps": ["divide"]}, "arrival": {"inputs": ["2026-04-10", 3], "steps": ["add_weeks"]}, "deposit": 500}
+
+Example 3
+Fields:
+- amount (number): Amount on the cheque
+- signed (date): Date the cheque was signed
+- items (list): Items ordered
+- pickup (time): Pickup time
+- nights (days): Length of the stay
+- typical (number): Typical price of the three comparable rooms
+Document:
+Pay Rupees One Lakh Twenty Thousand Only. Signed on the second of April, 2026. Order: oak table, two chairs, a lamp. Pickup at 2:15 pm. Check-in 3 March 2026, check-out 7 March 2026. Comparable rooms went for 80, 95 and 120.
+Answer:
+{"amount": 120000, "signed": "2026-04-02", "items": ["oak table", "two chairs", "a lamp"], "pickup": "14:15", "nights": {"inputs": ["2026-03-03", "2026-03-07"], "steps": ["days_between"]}, "typical": {"inputs": [80, 95, 120], "steps": ["median"]}}
+"""
+WHOLE_LIST = {"sum", "average", "median", "days_between"}
+
+
+def _input_value(raw, want_date: bool):
+    from datetime import date as _date
+
+    if isinstance(raw, bool):
+        raise ValueError("boolean input")
+    if isinstance(raw, (int, float)):
+        return Decimal(str(raw))
+    text = str(raw).strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return _date.fromisoformat(text)
+    try:
+        return parse_date(text, True)
+    except Drop:
+        return parse_number(text)
+
+
+def evaluate_calculation(calc: dict, spec: dict):
+    """The exact answer of a {"inputs", "steps"} object, in the field's type. Raises on anything malformed."""
+    from datetime import date as _date
+
+    from experiments.values import BLOCKS, _format, run_chain
+    from extractor.audit import quantize
+
+    inputs, steps = calc.get("inputs"), calc.get("steps")
+    if not isinstance(inputs, list) or not isinstance(steps, list) or not steps:
+        raise ValueError("malformed calculation")
+    values = [_input_value(v, spec["type"] == "date") for v in inputs]
+    if len(steps) == 1 and steps[0] in WHOLE_LIST:
+        op = steps[0]
+        field = {**spec, "decimals": spec.get("decimals", 2) if op != "median" else spec.get("decimals") or 0}
+        result = _format(op, values, field) if op != "median" else _format("median", values, field)
+        if result is None:
+            raise ValueError("wrong number of inputs")
+        return result
+    if any(step not in BLOCKS for step in steps):
+        raise ValueError(f"unknown step in {steps}")
+    result = run_chain(list(steps), values)
+    if result is None:
+        raise ValueError("steps and inputs do not line up")
+    if isinstance(result, _date):
+        return result.isoformat()
+    if spec["type"] == "duration":
+        return int(result)
+    return float(quantize(result, int(spec.get("decimals", 2))))
+
+
 # The user turn: the fields, then the document, in the same layout as the examples.
 TYPE_HINT = {"text": "text", "list": "list of text", "number": "number", "estimate": "number", "duration": "days",
              "date": "date", "time": "time", "datetime": "date-time"}
@@ -131,10 +244,10 @@ def gold_json(fields: list[dict]) -> str:
     return json.dumps(out, ensure_ascii=False)
 
 
-def messages_for(row: dict, fields: list[dict], shots: list[tuple[dict, list[dict]]]) -> list[dict]:
+def messages_for(row: dict, fields: list[dict], shots: list[tuple[dict, list[dict]]], system: str = SYSTEM) -> list[dict]:
     """The system prompt (rules and three worked examples), then optional real training notes
     as earlier turns with their gold JSON, then this note."""
-    messages = [{"role": "system", "content": SYSTEM}]
+    messages = [{"role": "system", "content": system}]
     for shot_row, shot_fields in shots:
         messages.append({"role": "user", "content": user_message(shot_row, shot_fields)})
         messages.append({"role": "assistant", "content": gold_json(shot_fields)})
@@ -159,6 +272,12 @@ def to_prediction(value, spec: dict) -> dict:
         return {"missing": True, "value": None}
     kind = spec["type"]
     dayfirst = spec.get("dayfirst", True)
+    if isinstance(value, dict):
+        # "LLM reads, code computes": the model gave inputs and steps; code does the arithmetic.
+        try:
+            return {"missing": False, "value": evaluate_calculation(value, spec), "calculated": True}
+        except (Drop, ValueError, TypeError, ArithmeticError, KeyError):
+            return {"missing": False, "value": None, "calculated": True}
     try:
         if kind in ("number", "estimate"):
             return {"missing": False, "value": float(value if isinstance(value, (int, float)) else parse_number(str(value)))}
@@ -186,6 +305,7 @@ def loose(text) -> str:
 def score_fields(items: list[tuple[dict, dict | None]]) -> dict:
     """items: (field, parsed reply or None). Exact (our metric) and loose-text scores, by operation."""
     hits, loose_hits, by_op, examples = 0, 0, defaultdict(Counter), []
+    calculated = Counter()
     for f, reply in items:
         spec = f["spec"]
         raw = None if reply is None else reply.get(f["field"])
@@ -198,12 +318,15 @@ def score_fields(items: list[tuple[dict, dict | None]]) -> dict:
             ok_loose = [loose(v) for v in predicted["value"]] == [loose(v) for v in spec.get("value") or []]
         hits += ok
         loose_hits += ok_loose
+        if predicted.get("calculated"):
+            calculated[ok] += 1
         by_op[f["op"]][ok] += 1
         if len(examples) < 300:
             examples.append({"field": f["field"], "op": f["op"], "gold": None if spec.get("missing") else spec.get("value"),
                              "said": raw, "right": ok, "right_loose": ok_loose})
     return {"fields": len(items), "exact": hits, "exact_loose_text": loose_hits,
             "by_op": {op: f"{c[True]}/{c[True] + c[False]}" for op, c in sorted(by_op.items())},
+            "calculated_right": f"{calculated[True]}/{calculated[True] + calculated[False]}",
             "examples": examples}
 
 
