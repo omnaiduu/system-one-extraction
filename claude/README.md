@@ -1,8 +1,8 @@
 # Claude's notes
 
-This folder is the working record of the session that rebuilt the extraction model's approach, from 7 November 2026. **If you only read two notes, read [14](14-results-at-a-glance.md) (every number) and [09](09-blog-draft.md) (the story and the claims).**
+This folder is the working record of the session that rebuilt the extraction model's approach, from 7 November 2026. **If you only read three notes, read [19](19-conclusion-a-good-highlighter.md) (the conclusion), [14](14-results-at-a-glance.md) (every number) and [09](09-blog-draft.md) (the story and the claims).**
 
-**Current best model:** experiment 4, one pass per note, 223/293 (76%) fully correct final answers on 72 notes it never trained on, against 139/293 for the earlier marking approach and about 10–15% for the original four heads. Files: `outputs/experiments/lora_onepass_*`. **Latest:** experiment 6 (computed fields and two-step chains, [16](16-computed-fields-and-chains.md)): exact on training wording (152/168), weaker on new wording (39/72 one step) and not yet composing (4/72 unseen two-step combinations). The calculator, operation choice and step choice on trained combinations are perfect; marking on new wording and composing are the gaps. **Next:** snap marks to whole numbers, much more varied phrasing, teach blocks not pairs; then the final grade (exam 4 and SROIE) once. It is written for two readers:
+**Conclusion (notes 17–20):** the trained extractor is **a good highlighter, not a reliable reader.** LoRA genuinely improved marking on new notes (exact evidence 116 → 195 of 293; final answers 223/293), but it collapsed on real receipts (66/1,362). Pointing cannot handle odd formats or values not on the page without fragile rules or a second LLM call. **Current best system:** untrained Gemma 4 E2B writing JSON, with calculated values returned as inputs and steps that our `values` code computes. It scores 252/293 on exams 1–3 and 1,120/1,362 on SROIE. Read [19](19-conclusion-a-good-highlighter.md) for the verdict and [20](20-session-record-for-the-blog.md) for how the session got there. It is written for two readers:
 
 - **Om, writing the engineering blog.** Everything the blog needs is here: the starting point, the diagnosis, the design decisions and the reasons, the experiments with their settings and numbers, the mistakes, and the claims that can and cannot be made.
 - **The next agent.** Read this before touching the model. It tells you what was tried, what was learned, which files matter, and how to run things.
@@ -47,6 +47,8 @@ The older notes are still true for their era and are worth reading after this: `
 16. [16 — Experiment 6: computed fields and chains](16-computed-fields-and-chains.md): exact one-step operations and two-step chains; what worked (the arithmetic, the choices on trained wording) and what did not (new wording, composing)
 17. [17 — The structured-output baseline](17-structured-output-baseline.md): untrained Gemma writing JSON, against our system; it reads better, computes worse, and is 34× slower
 18. [18 — LLM reads, code computes](18-llm-reads-code-computes.md): the LLM gives inputs and steps, code computes; it beats our system everywhere, and our system scores 5% on real receipts
+19. [19 — Conclusion: a good highlighter, not a reader](19-conclusion-a-good-highlighter.md): the verdict; where the LLM is good and why; where the architecture fails (formats, values not on the page) and where only the data failed (receipts); LoRA's real success; economics; lessons
+20. [20 — Session record for the blog](20-session-record-for-the-blog.md): Om's questions and challenges in order, how each idea was explained, experiment 7 (built, not run), framings, the new story arc
 
 ## Ground rules that still hold
 
