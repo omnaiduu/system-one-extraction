@@ -137,14 +137,20 @@ def main_ours() -> None:
     model.requires_grad_(False)
     roots = sorted(path for path in INPUT.rglob("SROIE2019/test") if (path / "box").is_dir())
     receipts, skipped = sroie.load_split(roots[0])
-    payload = {"receipts": len(receipts), "skipped": skipped, "ours": ours_on_sroie(model, receipts, "cuda:0")}
+    from experiments.evidence_data import load_rows
+
+    # Exams 1-3 through the same path: should give experiment 4's 223/293 if the loading and scoring are right.
+    dev = [r for r in load_rows() if r["split"] in ("exam1", "exam2", "exam3")]
+    payload = {"receipts": len(receipts), "skipped": skipped,
+               "ours": ours_on_sroie(model, receipts, "cuda:0", check_rows=dev)}
     payload["seconds"] = round(time.time() - started, 1)
     (OUT / "ours_sroie.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
     o = payload["ours"]["overall"]
-    log(f"sroie ours: found {o['found']}/{o['fields']}, value {o['value']}, wide dates {o['value_wide_dates']}")
+    log(f"sroie ours: found {o['found']}/{o['fields']}, value {o['value']}, wide dates {o['value_wide_dates']}; "
+        f"exams 1-3 check: {payload['ours'].get('exams1-3', {}).get('exact')}/293")
 
 
-def ours_on_sroie(model, receipts, device) -> dict:
+def ours_on_sroie(model, receipts, device, check_rows=None) -> dict:
     """Experiment 4's adapter, tagger and operation head, scored with `sroie.score` (as the final grade would)."""
     import torch
     import transformers
@@ -154,7 +160,7 @@ def ours_on_sroie(model, receipts, device) -> dict:
     from experiments.evidence_heads import Tagger
     from experiments.kaggle_final_job import find_one
     from experiments.kaggle_lora_job import attention_targets, text_tower
-    from experiments.lora_tagger import OpHead, encode, lora_logits
+    from experiments.lora_tagger import OpHead, encode, lora_logits, value_report
 
     checkpoint = torch.load(find_one("*_adapter.pt"), map_location="cpu", weights_only=False)
     lora = checkpoint["lora"]
@@ -186,6 +192,12 @@ def ours_on_sroie(model, receipts, device) -> dict:
     tags, ops, extras = lora_logits(forward, head, op_head, examples, layers, autocast)
     result = sroie.score(examples, tags, ops, float(checkpoint["bias"]), extras)
     result["seconds_per_receipt"] = round((time.time() - t0) / max(len(receipts), 1), 3)
+    result["layout"] = checkpoint.get("layout", "multi")
+    if check_rows:
+        check = encode(check_rows, tokenizer, result["layout"])
+        t, o, x = lora_logits(forward, head, op_head, check, layers, autocast)
+        report = value_report(check, t, o, float(checkpoint["bias"]), extras=x)
+        result["exams1-3"] = {k: report[k] for k in ("fields", "exact", "by_op", "op_choice")}
     return result
 
 
