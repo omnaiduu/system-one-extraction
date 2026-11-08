@@ -183,3 +183,20 @@ def test_final_grade_summary_reports_computed_fields():
                    "by_field": {}, "confidence": sel}}}
     text = summarize(payload)
     assert "combo_unseen | 3/5 | 2/3" in text
+
+
+def test_old_op_head_without_new_operations():
+    """An operation head trained before "average" and "chain" existed has 12 outputs; nothing may index past them."""
+    import torch
+
+    from experiments.lora_tagger import choose_op, field_confidence, legal_ops
+    from experiments.values import OPS
+
+    ex = {"type": "number"}
+    op_logits = torch.zeros(OPS.index("average"))
+    assert "average" not in legal_ops(ex, op_logits) and "chain" not in legal_ops(ex, op_logits)
+    op = choose_op(ex, op_logits)
+    tags = torch.zeros(6, 3)
+    tags[2, 1] = 5.0
+    conf = field_confidence(ex, tags, op_logits, 0.0, [(2, 3)], op)
+    assert 0.0 < conf["confidence"] <= 1.0

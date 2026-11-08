@@ -474,10 +474,16 @@ def reader_extras(readers: dict, ex: dict, doc: torch.Tensor, question: torch.Te
     return extra
 
 
-def choose_op(ex: dict, op_logits: torch.Tensor | None) -> str:
+def legal_ops(ex: dict, op_logits: torch.Tensor | None) -> tuple[str, ...]:
+    """Operations this field type allows that the head has an output for (older heads lack "average"/"chain")."""
     allowed = ALLOWED[ex["type"]]
     if op_logits is not None:
         allowed = tuple(op for op in allowed if OPS.index(op) < len(op_logits))
+    return allowed
+
+
+def choose_op(ex: dict, op_logits: torch.Tensor | None) -> str:
+    allowed = legal_ops(ex, op_logits)
     if len(allowed) == 1 or op_logits is None:
         return allowed[0]
     return max(allowed, key=lambda op: float(op_logits[OPS.index(op)]))
@@ -559,9 +565,9 @@ def field_confidence(ex: dict, tag_logits: torch.Tensor, op_logits, bias: float,
         picked.update(range(max(a - 1, 0), min(b + 2, len(tags))))
     logs = [float(torch.log(probs[t, int(tags[t])] + 1e-12)) for t in sorted(picked)]
     tag_conf = float(torch.exp(torch.tensor(sum(logs) / len(logs))))
-    allowed = ALLOWED[ex["type"]]
+    allowed = legal_ops(ex, op_logits)
     op_conf = 1.0
-    if op_logits is not None and len(allowed) > 1:
+    if op_logits is not None and len(allowed) > 1 and op in allowed:
         legal = torch.softmax(torch.stack([op_logits[OPS.index(o)] for o in allowed]).float(), 0)
         op_conf = float(legal[allowed.index(op)])
     step_conf = 1.0

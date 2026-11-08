@@ -124,6 +124,26 @@ def main() -> None:
     log(f"done in {payload['seconds']} s")
 
 
+def main_ours() -> None:
+    """Only our system on SROIE (the first full run crashed there after the LLM parts finished)."""
+    import torch
+    import transformers
+
+    from experiments import sroie
+
+    started = time.time()
+    model = transformers.AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float16, device_map="cuda:0")
+    model.eval()
+    model.requires_grad_(False)
+    roots = sorted(path for path in INPUT.rglob("SROIE2019/test") if (path / "box").is_dir())
+    receipts, skipped = sroie.load_split(roots[0])
+    payload = {"receipts": len(receipts), "skipped": skipped, "ours": ours_on_sroie(model, receipts, "cuda:0")}
+    payload["seconds"] = round(time.time() - started, 1)
+    (OUT / "ours_sroie.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
+    o = payload["ours"]["overall"]
+    log(f"sroie ours: found {o['found']}/{o['fields']}, value {o['value']}, wide dates {o['value_wide_dates']}")
+
+
 def ours_on_sroie(model, receipts, device) -> dict:
     """Experiment 4's adapter, tagger and operation head, scored with `sroie.score` (as the final grade would)."""
     import torch
