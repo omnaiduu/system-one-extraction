@@ -43,8 +43,8 @@ The older notes are still true for their era and are worth reading after this: `
 13. [13 — The learned reader and the emit head](13-reader-and-emit.md): what was built, why it failed, what to do instead
 14. [14 — Every result in one place](14-results-at-a-glance.md): the tables for the blog
 15. [15 — Compared with Cloudflare's Clairic](15-compared-with-cloudflare.md): capability by capability, and what would close the gap
-17. [17 — The structured-output baseline](17-structured-output-baseline.md): untrained Gemma writing JSON, against our system; it reads better, computes worse, and is 34× slower
 16. [16 — Experiment 6: computed fields and chains](16-computed-fields-and-chains.md): exact one-step operations and two-step chains; what worked (the arithmetic, the choices on trained wording) and what did not (new wording, composing)
+17. [17 — The structured-output baseline](17-structured-output-baseline.md): untrained Gemma writing JSON, against our system; it reads better, computes worse, and is 34× slower
 
 ## Ground rules that still hold
 
