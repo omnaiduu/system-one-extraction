@@ -150,6 +150,76 @@ Pay Rupees One Lakh Twenty Thousand Only. Signed on the second of April, 2026. O
 Answer:
 {"amount": 120000, "signed": "2026-04-02", "items": ["oak table", "two chairs", "a lamp"], "pickup": "14:15", "nights": {"inputs": ["2026-03-03", "2026-03-07"], "steps": ["days_between"]}, "typical": {"inputs": [80, 95, 120], "steps": ["median"]}}
 """
+
+# The same prompt again, but a calculation is an ordinary formula (experiments/formula.py), not our step names.
+# Same rules, same three example documents and fields as SYSTEM_CALC, so only the format changes.
+SYSTEM_FORMULA = """You are a precise information-extraction engine. You read one document and return the values of the requested fields as a single JSON object. You never explain, never add keys, never wrap the JSON in markdown.
+
+How to answer each type:
+- text: copy the exact words from the document, character for character (same spelling, capitals and punctuation). Do not shorten, expand or tidy them.
+- number: a plain JSON number, no currency, no thousands separators, no units: 1486.75, not "Rs 1,486.75".
+- date: "YYYY-MM-DD". Read any format, including words ("the second of April, 2026" -> "2026-04-02"). Two-number dates like 04/06/2026 are day first.
+- time: "HH:MM" on a 24-hour clock ("2:15 pm" -> "14:15").
+- date-time: "YYYY-MM-DDTHH:MM".
+- days: a whole number of days.
+- list: a JSON array of the exact items, in the order they appear in the document.
+
+Rules that matter:
+1. Use null when the document does not contain the value. Never guess, never invent.
+2. Documents contain decoys: other invoices, old prices, a spare part that "is not this ticket", a reference "not copied onto this note". Answer for the thing the field asks about, not the decoy.
+3. NEVER do arithmetic yourself, not even for dates. When a number, date or number of days is printed, give it. When it must be calculated from printed values, give the formula instead of the answer:
+   {"formula": "..."}
+   - Use only numbers and dates printed in the document, written plainly (1486.75, 15% for a rate, dates as YYYY-MM-DD), with + - * / and brackets.
+   - Percentages: 15% off -> x * (1 - 15%); plus 18% tax -> x * (1 + 18%); 10% of x -> x * 10%.
+   - Dates: 3 weeks after a date -> 2026-04-10 + weeks(3); 25 days before (or ahead of) a date -> 2026-03-26 - days(25); days from one date to another -> 2026-03-07 - 2026-03-03.
+   - Several values: sum(a, b, c), mean(a, b, c), median(a, b, c).
+   - Follow the order the document describes, with brackets: (a + b) / 4 when a total is split four ways.
+   The formula is computed exactly by code.
+4. Numbers written in words are still numbers: "one lakh twenty thousand" is 120000; "fourteen days" is 14.
+5. Instructions after each field name say exactly what is wanted; follow them literally.
+
+Example 1
+Fields:
+- supplier (text): Company that issued the invoice
+- invoice_no (text): Invoice number of this invoice
+- total (number): Total of the line items
+- due (date): Payment due date
+- tracking (text): Courier tracking number
+Document:
+Adriatic Pipeworks d.o.o. - invoice AP-2745, dated 4 June 2026. Pipes 1,200.00 and fittings 286.75. Payment within 21 days. The cancelled invoice AP-2749 should be ignored.
+Answer:
+{"supplier": "Adriatic Pipeworks d.o.o.", "invoice_no": "AP-2745", "total": {"formula": "1200.00 + 286.75"}, "due": {"formula": "2026-06-04 + days(21)"}, "tracking": null}
+
+Example 2
+Fields:
+- final_price (number): Price after the discount and the tax
+- share (number): What each flatmate pays
+- arrival (date): Date the parcel arrives
+- deposit (number): Deposit paid
+Document:
+Subtotal Rs 2,400. 15% off for members, then 18% GST on the discounted amount. Rent of 900 is split equally between 4 flatmates. Shipped 10/04/2026; it arrives 3 weeks later. A deposit of 500 was paid.
+Answer:
+{"final_price": {"formula": "2400 * (1 - 15%) * (1 + 18%)"}, "share": {"formula": "900 / 4"}, "arrival": {"formula": "2026-04-10 + weeks(3)"}, "deposit": 500}
+
+Example 3
+Fields:
+- amount (number): Amount on the cheque
+- signed (date): Date the cheque was signed
+- items (list): Items ordered
+- pickup (time): Pickup time
+- nights (days): Length of the stay
+- typical (number): Typical price of the three comparable rooms
+Document:
+Pay Rupees One Lakh Twenty Thousand Only. Signed on the second of April, 2026. Order: oak table, two chairs, a lamp. Pickup at 2:15 pm. Check-in 3 March 2026, check-out 7 March 2026. Comparable rooms went for 80, 95 and 120.
+Answer:
+{"amount": 120000, "signed": "2026-04-02", "items": ["oak table", "two chairs", "a lamp"], "pickup": "14:15", "nights": {"formula": "2026-03-07 - 2026-03-03"}, "typical": {"formula": "median(80, 95, 120)"}}
+"""
+
+# Asked once more, only for fields whose answer used a value that is not printed in the document.
+RETRY = """These answers use values that are not printed in the document:
+{problems}
+A value that is not printed must be calculated with {{"formula": "..."}} from values that are printed, and a formula may only use numbers and dates printed in the document. Answer again, as one JSON object with only these fields: {fields}"""
+
 WHOLE_LIST = {"sum", "average", "median", "days_between"}
 
 
@@ -272,6 +342,14 @@ def to_prediction(value, spec: dict) -> dict:
         return {"missing": True, "value": None}
     kind = spec["type"]
     dayfirst = spec.get("dayfirst", True)
+    if isinstance(value, dict) and "formula" in value:
+        # The model wrote a formula; code evaluates it (experiments/formula.py).
+        from experiments.formula import FormulaError, answer
+
+        try:
+            return {"missing": False, "value": answer(str(value["formula"]), spec), "calculated": True}
+        except (FormulaError, Drop, ValueError, TypeError, ArithmeticError):
+            return {"missing": False, "value": None, "calculated": True}
     if isinstance(value, dict):
         # "LLM reads, code computes": the model gave inputs and steps; code does the arithmetic.
         try:

@@ -1,6 +1,6 @@
 """Pack the experiment into one Kaggle kernel script.
 
-    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora|lora_onepass|lora_emit|lora_chains|lora_grammar|structured|hybrid SOURCE_KERNEL|ours_sroie SOURCE_KERNEL|final SOURCE_KERNEL]
+    python experiments/make_kaggle_kernel.py OUT_DIR [question_order|lora|lora_onepass|lora_emit|lora_chains|lora_grammar|structured|formula|hybrid SOURCE_KERNEL|ours_sroie SOURCE_KERNEL|final SOURCE_KERNEL]
     kaggle kernels push -p OUT_DIR
 
 The kernel script carries the raw writer files, `extractor/`, and
@@ -31,6 +31,8 @@ JOBS = {
     "structured": ("ommnaidu/gemma-e2b-structured", "Gemma E2B structured", "experiments.kaggle_structured_job", "main"),
     # LLM reads, code computes; plus our experiment-4 model on SROIE. Needs the model kernel as a source.
     "hybrid": ("ommnaidu/gemma-e2b-hybrid", "Gemma E2B hybrid", "experiments.kaggle_hybrid_job", "main"),
+    # Formulas, the page check with one retry, and structured output (xgrammar). Reads SROIE; no exam 4.
+    "formula": ("ommnaidu/gemma-e2b-formula", "Gemma E2B formula", "experiments.kaggle_formula_job", "main"),
     # Only the second half of "hybrid": our experiment-4 model on SROIE (no LLM generation).
     "ours_sroie": ("ommnaidu/gemma-e2b-ours-sroie", "Gemma E2B ours SROIE", "experiments.kaggle_hybrid_job", "main_ours"),
     # The final grade. The only job whose bundle contains exam 4. Needs the
@@ -38,6 +40,7 @@ JOBS = {
     "final": ("ommnaidu/gemma-e2b-final-grade", "Gemma E2B final grade", "experiments.kaggle_final_job", "main"),
 }
 SROIE_DATASET = "urbikn/sroie-datasetv2"
+EXTRA_PACKAGES = {"structured": ', "lm-format-enforcer"', "formula": ', "xgrammar"'}
 
 INCLUDE_DIRS = ("extractor", "experiments")
 EXCLUDED_RAW = ("data/exam4",)
@@ -90,7 +93,7 @@ def write_kernel(out_dir: Path, job: str = "question_order", source_kernel: str 
     out_dir.mkdir(parents=True, exist_ok=True)
     script = out_dir / "kernel.py"
     script.write_text(f"BUNDLE = {make_bundle(include_exam4=final)!r}\n" + STUB.format(title=title, module=module, function=function,
-                                                                              extra=', "lm-format-enforcer"' if job == "structured" else ""))
+                                                                              extra=EXTRA_PACKAGES.get(job, "")))
     metadata = {
         "id": kernel_id,
         "title": title,
@@ -102,7 +105,7 @@ def write_kernel(out_dir: Path, job: str = "question_order", source_kernel: str 
         "enable_tpu": False,
         "enable_internet": True,
         "keywords": [],
-        "dataset_sources": [SROIE_DATASET] if final or job in ("structured", "hybrid", "ours_sroie") else [],
+        "dataset_sources": [SROIE_DATASET] if final or job in ("structured", "hybrid", "ours_sroie", "formula") else [],
         "kernel_sources": [source_kernel] if source_kernel and job in ("final", "hybrid", "ours_sroie") else [],
         "competition_sources": [],
         "model_sources": [],
