@@ -1,12 +1,14 @@
 # 10 — Next steps and open questions
 
-**Current best system: LLM reads, code computes** (note 18): untrained Gemma 4 E2B with `SYSTEM_CALC`, calculated values computed by `values`. 252/293 on exams 1–3, 1,120/1,362 on SROIE. Our best trained model (experiment 4, 223/293) scores 66/1,362 on real receipts and is no longer the recommendation.
+**Current best system (note 21):** untrained Gemma 4 E2B, structured output with xgrammar, calculations as formulas evaluated by `experiments/formula.py`, the page check with one retry, prompt `SYSTEM_FORMULA` (v1; v2 adds +4 of 145 on exam 4). Exams 1–3 257/293, exam 4 63/74, SROIE 1,108/1,362. **Exam 4 has been used** (note 21): there is no clean held-out set left in the repo.
 
 ## 0. What to do next, in order
 
-1. Make the hybrid follow its own rule: schema-constrained decoding (get lm-format-enforcer or outlines working with Gemma 4's tokenizer) so a calculated date cannot come back as a literal date (38 of 39 rule breaks were dates), and a single-step form for median and average.
-2. Exam 4, once, with the hybrid and experiment 4 side by side.
-3. If cost matters (about 5 s a note against 0.14 s), distill: run the hybrid over real documents and train the small tagger on its answers, then measure on documents of a kind it never saw. Synthetic notes alone do not transfer (note 18).
+1. **Fix the page check's decimal-rate false alarm** (`* 0.08` for 8% is correct but flagged; accept a number whose ×100 or (−1)×100 is printed). Found on exam 4, deliberately not fixed before grading.
+2. **Decide whether the retry is worth it.** It helps on calculation sets, costs a few fields on receipts and exam 4. Option: retry only fields whose literal date or number is not on the page, never rewrite a formula that only fails on a rate.
+3. **A new held-out set** before any further tuning: real documents with calculations, or notes from a different writer. Exam 4 is spent.
+4. Remaining two-step errors: brackets (`a + b / 3`) and a date counted from another calculated date (0/18 on dev). A worked example in the prompt is the next cheap try; measure on the new held-out set.
+5. If cost matters (about 5 s a note against 0.14 s), distill: run the hybrid over real documents and train the small tagger on its answers, then measure on documents of a kind it never saw. Synthetic notes alone do not transfer (note 18).
 
 The sections below are the older plan for the trained system.
 

@@ -52,7 +52,21 @@ Two general rules added after reading round 1's errors (`SYSTEM_FORMULA_V2`; a t
 - "Brackets matter: a + b / 3 divides only b. Put a total in brackets before dividing, multiplying or adding a percentage to it: (a + b) / 3, (a + b) * (1 + 18%)."
 - "A date counted from another date that is itself calculated: chain them in one formula, 2026-05-01 + weeks(2) - days(3)."
 
-Plus the fixed receipt-date check. Constrained mode only. Results: RESULTS_V2
+Plus the fixed receipt-date check. Constrained mode only.
+
+| Part | Round 1 (v1) | **Round 2 (v2)** |
+| --- | --- | --- |
+| One step (72) | 67 | 65 |
+| Two steps, trained pair (72) | 30 | **36** |
+| Two steps, new pair (72) | 40 | 40 |
+| Exams 1–3 (293) | 257 | 258 |
+| Numbers and dates in words (287) | 250 | 250 |
+| SROIE receipts (1,362), after retry | 1,032 (date-check bug) | **1,108** (first answers 1,112) |
+
+- **The date-check fix worked**: receipt dates 229 → 301 after the retry. The retry still costs 4 fields net on receipts (dates 306 → 301), so on receipts it does not pay for itself; text fields are not checked.
+- **The bracket rule helped one kind**: "hotel plus meals, 20% tax on everything" 0/14 → 6/14. "Venue and catering split across 7 teams" did not move (3 → 2 of 15).
+- **The chained-date rule did nothing**: still 0/18; the model keeps writing `2027-10-25 - days(11)` and drops the four weeks.
+- So the rules are worth little even on the data they were written for. Exam 4 decides.
 
 ## The dev/test conversation (for the blog)
 
@@ -73,11 +87,33 @@ How each change is classed:
 
 ## The exam 4 head-to-head (run once)
 
-Frozen before it ran (commit `25f6953`): the LLM with prompt v1 and v2 (constrained, check, retry), and our trained experiment-4 and experiment-6 models as selected, on the same parts: exam 4 as written (24 notes), exam 4 with numbers and dates in words (seed 47), and exam 4 with one computed field per note in the three kinds (seed 59). Results: RESULTS_EXAM4
+Frozen before it ran (commit `25f6953`): the LLM with prompt v1 and v2 (constrained, check, retry), and our trained experiment-4 and experiment-6 models as selected, on the same parts: exam 4 as written (24 notes), exam 4 with numbers and dates in words (seed 47), and exam 4 with one computed field per note in the three kinds (seed 59).
+
+**Exam 4 results** (`outputs/experiments/head_to_head_results.{md,json}`; constrained decoding, after the check and retry):
+
+| Part | LLM, prompt v1 | LLM, prompt v2 | Ours, experiment 4 | Ours, experiment 6 |
+| --- | --- | --- | --- | --- |
+| Exam 4 as written (74 fields) | **63** | 62 | 57 | **63** |
+| Exam 4, numbers and dates in words (71) | **62** | **62** | not measured (no reader in these checkpoints) | not measured |
+| Computed, one step (24) | **23** | 22 | – (no step head) | 9 |
+| Computed, two steps, trained pair (24) | 6 | **11** | – | 3 |
+| Computed, two steps, new pair (24) | 14 | **15** | – | 1 |
+
+What exam 4 says:
+
+1. **On notes like the training notes, the best trained model ties the LLM**: experiment 6 63/74, the LLM 63/74 (experiment 4 57). The trained highlighter is genuinely good on its own kind of document. (On real receipts it was 66/1,362 against 1,108; see note 18.)
+2. **On calculations the LLM with formulas wins clearly**: one step 23 vs 9, two steps 6–11 vs 3 and 14–15 vs 1.
+3. **The dev numbers held up on unseen notes.** Exams 1–3 257/293 (88%) → exam 4 63/74 (85%); one step 67/72 (93%) → 23/24 (96%); two steps, new pair 40/72 (56%) → 14–15/24 (58–63%). Two steps, trained pair dropped (42% → 25% with v1). The development work did not overfit badly.
+4. **Prompt v2 vs v1 on unseen notes: +4 fields of 145 net** (two steps, trained pair +5, new pair +1, one step −1, plain −1). The bracket rule transfers a little; small numbers, so call it "slightly helpful", not proven.
+5. **A second false alarm in the page check**: a rate written as a decimal, e.g. `6 * 4023.25 + 6 * 4023.25 * 0.08` (correct!), is flagged because 0.08 is not printed. The retry sometimes rewrites it as `8%` (right) and sometimes breaks it (`2068.83 * 1.10 / 2` → `2068.83 * 10 / 20`). Net, the retry changed exam-4 two-step scores by −2 to +2. **Not fixed**: exam 4 is graded and a fix now would be tuning after the test. The fix for next time: accept a number whose ×100 or (−1)×100 is on the page as a rate.
+
+The trained models' words row is missing: neither selected checkpoint has the reader heads (experiment 5's readers were not kept in the final models), so the final job skips it. Their calculation rows come from experiment 6's step head; experiment 4 has none.
 
 ## What to say in the blog
 
 - **"Make the model say what it means in the language it already knows."** Our step names were a private language; the 2B model translated into it badly. Formulas are a language it already speaks. Same model, same prompt, no training: one-step calculations 43 → 67 of 72.
 - **Structured output is cheap accuracy.** It helped every field type, not only calculations, and costs about a second per note.
 - **A check that a value is on the page is a strong, cheap gate**, and it is the honest version of "confidence": it says which answers to trust. But a check with false alarms is worse than none (the receipt-date bug).
-- **Tune on a dev set, grade once on a held-out set.** Prompt changes after looking at errors are fine; quoting those numbers as the result is not.
+- **Tune on a dev set, grade once on a held-out set.** Prompt changes after looking at errors are fine; quoting those numbers as the result is not. Here the held-out grade (exam 4) agreed with the dev numbers within a few points, and the tuned rules added only +4 of 145: most of the gain came from the general changes (formulas, structured output), not from rules fitted to the errors.
+- **The fair final picture**: on notes like the training notes, a well-trained small highlighter ties the untrained LLM (63/74 each). On calculations (23 vs 9; 14 vs 1) and on real documents (1,108 vs 66 of 1,362), the LLM with formulas, structured output and code arithmetic wins.
+- **Checks need their own testing.** Both page-check false alarms (receipt dates, decimal rates) made the retry change correct answers into wrong ones.

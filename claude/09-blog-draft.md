@@ -41,6 +41,7 @@ We wanted a Clairic-style extractor on Gemma 4 E2B: read a note once, return typ
 12d. **The challenge and the baseline.** The same untrained Gemma writing JSON: reads better, computes worse, 34× slower. See [17](17-structured-output-baseline.md).
 12e. **LLM reads, code computes.** Best on every test. See [18](18-llm-reads-code-computes.md).
 12f. **Real receipts.** Ours 66/1,362, the LLM 1,120/1,362. The 223/293 exams check rules out a bug.
+12f2. **Making the LLM reliable at calculations** (note 21). Read the errors first: it mistranslated into our step names. Formulas, a page check and structured output: one step 43 → 67/72 with no training. The receipt-date bug (a check with false alarms makes things worse). The dev/test conversation and the student analogy. Exam 4, run once: the best trained model ties the LLM on notes like its training notes (63/74 each); the LLM wins calculations (23 vs 9; 14 vs 1) and real receipts.
 12g. **What failed where, and what survives.** The architecture failed at formats and at values not on the page; the data failed at receipts. What survives is LoRA as a highlighter, the calculator and the lessons. Economics: not viable now. See [19](19-conclusion-a-good-highlighter.md).
 13. **What it does not prove yet.** See the claims below and [15](15-compared-with-cloudflare.md).
 14. **The plumbing, briefly.** Free Kaggle T4s; each experiment is one self-contained 170–200 KB kernel script; no card needed. The detours (Modal needed a card; a commit marker that triggered itself) as an honest aside.
@@ -72,15 +73,19 @@ We wanted a Clairic-style extractor on Gemma 4 E2B: read a note once, return typ
 - Our trained system scored 66/1,362 on SROIE test receipts, zero-shot. The same run reproduced 223/293 on exams 1–3.
 - LoRA improved the highlighter on new notes of the training kind; it did not transfer to receipts.
 - Its confidence did not transfer either: at ≥ 0.99, 92% right on exam notes and 16% (67/426) on receipts.
+- Writing calculations as ordinary formulas evaluated by code, plus structured output (xgrammar), raised one-step calculations from 43/72 to 67/72 and two-step from 21 and 26 to 30 and 40, with no training (prompt v1, fitted to nothing).
+- On exam 4 (24 notes, held out, run once after everything was frozen): the untrained LLM 63/74, our best trained model 63/74; calculations 23, 6–11 and 14–15 of 24 for the LLM against 9, 3 and 1 for ours.
+- A page check (every number and date used must be printed) leaves answers that are right about 90% of the time on exams and words.
 
 ## Claims: not allowed (yet)
 
 - **"We cracked it" / "as good as Clairic" / "we rebuilt Clairic".** Cloudflare published no architecture and no extraction accuracy; there is nothing to match against. Clairic also covers estimates with intervals, forecasts, images and real data, which this project does not.
 - **A production accuracy.** All numbers are on one writer's synthetic notes with repeated skeletons.
-- **Exam 4 numbers** until it has run, once. (Real-document numbers now exist: SROIE, note 18.)
+- **Prompt v2's dev numbers as results.** They were tuned on those sets; on exam 4 v2 added only +4 of 145.
+- **"The LLM beats the trained model on everything."** On exam 4 as written, the best trained model tied it (63/74). It loses on calculations and real documents.
 - **"More training data would have fixed it."** Only for printed fields, and untested. For calculated values and odd formats, the pointing architecture is the limit.
 - **"A trained extractor is never worth it."** It is a cost decision: about 30–35× cheaper per note, worth building only at high volume, with real documents (for example, LLM-labelled ones).
-- **"The LLM baseline was fully tuned."** One system prompt, free generation (the schema enforcer failed to import), no constrained decoding. It may do better still.
+- **"The LLM baseline was fully tuned."** One system prompt and two small rule additions. Structured output is now in (note 21); a bigger model or worked two-step examples may do better still.
 - **"Handles numbers in words" or "emits values not on the page".** Both were tested and failed.
 - **"Computes multi-step values" or "composes operations".** Only on training wording; 4/72 on unseen combinations. "Exact one-step calculations on familiar wording" is allowed.
 - **"Exams 1–3 are a clean test."** They were read by earlier rounds. They are dev, although nothing in this session was chosen on them.
@@ -97,6 +102,8 @@ We wanted a Clairic-style extractor on Gemma 4 E2B: read a note once, return typ
 - "When very different heads hit the same ceiling, the ceiling is what they share."
 - "It knows *when* a value must be emitted (103/103). It cannot *do* the emitting (0/72)."
 - "A good highlighter, not a reader." (Om's.)
+- "Make the model say what it means in a language it already knows." Our step names were a private language; formulas are not.
+- "A student who studies the practice questions they got wrong is doing the right thing. Quoting their practice score as their exam score is not." (Dev set and held-out set.)
 - "It generalized to new notes, not to new kinds of documents."
 - "Our system *was* that 2B model; narrow training made it narrower."
 - More are in [20](20-session-record-for-the-blog.md).
@@ -111,6 +118,9 @@ The lessons from the ending (the full list is in [19](19-conclusion-a-good-highl
 - **A pointer cannot write.**
 - **Let models read and code compute.**
 - **Confidence does not transfer across document types.**
+- **Read the errors before fixing.** The calculation errors were translation, not arithmetic.
+- **Tune on dev, grade once on held-out.** Here the held-out grade agreed with dev within a few points.
+- **A check with false alarms makes the system worse.** Test the check on the documents it will guard.
 
 The earlier lessons:
 

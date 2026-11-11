@@ -93,6 +93,34 @@ Same Gemma 4 E2B, no training, JSON output, system prompt with worked examples. 
 
 SROIE by field, LLM reads and code computes against ours: company 239 / 3, date 314 / 63, address 304 / 0, total 263 / 0.
 
+## Formulas, page check, structured output (note 21)
+
+The same untrained LLM; calculations as ordinary formulas evaluated by code; every number and date must be on the page (else one retry); JSON forced by xgrammar. Round 1 (prompt v1) was fitted to nothing; round 2 (v2) added two rules after reading round 1's errors, so its dev numbers are tuned.
+
+| Part | Note 18 (steps) | Round 1, free | **Round 1, structured** | Round 2, structured | Our system |
+| --- | --- | --- | --- | --- | --- |
+| One step (72) | 43 | 58 | **67** | 65 | 39 |
+| Two steps, trained pair (72) | 21 | 29 | **30** | 36 | 9 |
+| Two steps, new pair (72) | 26 | 40 | **40** | 40 | 4 |
+| Exams 1–3 (293) | 252 | 251 | **257** | 258 | 223 |
+| Words (287) | 227 | 234 | **250** | 250 | 147 |
+| SROIE (1,362) | 1,120 | – | 1,032 (date-check bug) | 1,108 | 66 |
+| Seconds per generation, T4 | 4.9 | 3.3 | 4.2 | 4.6 | 0.14 |
+
+Answers that pass the page check are right about 90% of the time on exams and words (257/289, 250/286).
+
+## Exam 4: the held-out grade, run once (note 21)
+
+| Part | LLM v1 | LLM v2 | Ours, exp. 4 | Ours, exp. 6 |
+| --- | --- | --- | --- | --- |
+| Exam 4 (74) | **63** | 62 | 57 | **63** |
+| Exam 4 in words (71) | **62** | **62** | not measured | not measured |
+| One step (24) | **23** | 22 | – | 9 |
+| Two steps, trained pair (24) | 6 | **11** | – | 3 |
+| Two steps, new pair (24) | 14 | **15** | – | 1 |
+
+Dev held up: exams 1–3 88% → exam 4 85%; one step 93% → 96%; two steps, new pair 56% → 58–63%. Prompt v2's tuned rules: +4 of 145 on exam 4.
+
 ## Cost and time
 
 Everything ran on Kaggle's free T4s. Experiment 1: 39 min. Experiment 2: 50 min (plus an 11-minute failed attempt). Experiment 3: 78 min. Experiment 4: 26 min. Experiments 5a and 5b: 55 min each. Experiment 6: 55 min. Structured baseline: 62 min. LLM reads, code computes: 59 min, plus 4 min for our system on SROIE. No money was spent anywhere.

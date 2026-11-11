@@ -2,7 +2,7 @@
 
 This folder is the working record of the session that rebuilt the extraction model's approach, from 7 November 2026. **If you only read three notes, read [19](19-conclusion-a-good-highlighter.md) (the conclusion), [14](14-results-at-a-glance.md) (every number) and [09](09-blog-draft.md) (the story and the claims).**
 
-**Conclusion (notes 17–20):** the trained extractor is **a good highlighter, not a reliable reader.** LoRA genuinely improved marking on new notes (exact evidence 116 → 195 of 293; final answers 223/293), but it collapsed on real receipts (66/1,362). Pointing cannot handle odd formats or values not on the page without fragile rules or a second LLM call. **Current best system:** untrained Gemma 4 E2B writing JSON, with calculated values returned as inputs and steps that our `values` code computes. It scores 252/293 on exams 1–3 and 1,120/1,362 on SROIE. Read [19](19-conclusion-a-good-highlighter.md) for the verdict and [20](20-session-record-for-the-blog.md) for how the session got there. It is written for two readers:
+**Conclusion (notes 17–20):** the trained extractor is **a good highlighter, not a reliable reader.** LoRA genuinely improved marking on new notes (exact evidence 116 → 195 of 293; final answers 223/293), but it collapsed on real receipts (66/1,362). Pointing cannot handle odd formats or values not on the page without fragile rules or a second LLM call. **Current best system (note 21):** untrained Gemma 4 E2B with structured output (xgrammar), calculated values written as ordinary formulas that code evaluates exactly, and a check that every number and date used is printed in the document. 257/293 on exams 1–3, 63/74 on exam 4 (held out, run once), 1,108/1,362 on SROIE. Read [19](19-conclusion-a-good-highlighter.md) for the verdict and [20](20-session-record-for-the-blog.md) for how the session got there. It is written for two readers:
 
 - **Om, writing the engineering blog.** Everything the blog needs is here: the starting point, the diagnosis, the design decisions and the reasons, the experiments with their settings and numbers, the mistakes, and the claims that can and cannot be made.
 - **The next agent.** Read this before touching the model. It tells you what was tried, what was learned, which files matter, and how to run things.
@@ -24,7 +24,8 @@ The older notes are still true for their era and are worth reading after this: `
 | Is an untrained LLM with structured output better? | **At reading, yes.** Same Gemma 4 E2B, no training, JSON: 250/293 on exams 1–3 (ours 223), words 216/287 (ours 147), SROIE receipts 1,109/1,362. **At computing, no**: one-step 22/72 (ours 39), two-step 2/72 and 0/72 (ours 9 and 4). And 34× slower (4.65 s against 0.14 s a note). Points to: LLM reads, code computes. | [17](17-structured-output-baseline.md) |
 | LLM reads, code computes? | **Best on every test.** The LLM gives inputs and steps; our `values` code computes. Exams 1–3 252/293, one-step 43/72, two-step 21/72 and 26/72 (ours 39, 9, 4), words 227/287, receipts 1,120/1,362. About 5 s a note. | [18](18-llm-reads-code-computes.md) |
 | Real documents? | **Our system fails on them.** SROIE test receipts, zero-shot: ours 66/1,362 (5%); untrained Gemma with JSON and code for arithmetic 1,120/1,362 (82%). The same run scored exams 1–3 at 223/293, so it is not a loading bug. | [18](18-llm-reads-code-computes.md) |
-| Exam 4? | Not touched. It is kept for one final grade. | [10](10-next-steps.md) |
+| Why were the LLM's calculations still low, and what fixed them? | It was mistranslating notes into our invented step names. **Formulas** (`2400 * (1 - 15%) * (1 + 18%)`) evaluated by code, a **page check** with one retry, and **structured output** (xgrammar): one step 43 → 67/72, two steps 21/26 → 30/40, exams 257/293, words 250/287. | [21](21-formulas-page-check-structured-output.md) |
+| Exam 4? | **Used once, 11 November 2026**, frozen beforehand. LLM 63/74, our best trained model (exp. 6) 63/74: a tie on notes like the training notes. Calculations: LLM 23, 6–11, 14–15 of 24; ours 9, 3, 1. Dev numbers held up. | [21](21-formulas-page-check-structured-output.md) |
 | Real customer mail? | None on disk. SROIE receipts are the real-document test. | [09](09-blog-draft.md) |
 
 ## Reading order
@@ -49,6 +50,7 @@ The older notes are still true for their era and are worth reading after this: `
 18. [18 — LLM reads, code computes](18-llm-reads-code-computes.md): the LLM gives inputs and steps, code computes; it beats our system everywhere, and our system scores 5% on real receipts
 19. [19 — Conclusion: a good highlighter, not a reader](19-conclusion-a-good-highlighter.md): the verdict; where the LLM is good and why; where the architecture fails (formats, values not on the page) and where only the data failed (receipts); LoRA's real success; economics; lessons
 20. [20 — Session record for the blog](20-session-record-for-the-blog.md): Om's questions and challenges in order, how each idea was explained, experiment 7 (built, not run), framings, the new story arc
+21. [21 — Formulas, the page check, structured output](21-formulas-page-check-structured-output.md): why the LLM's calculations were low, the three fixes, rounds 1 and 2, the dev/test conversation, and exam 4 run once (LLM and trained models side by side)
 
 ## Ground rules that still hold
 
