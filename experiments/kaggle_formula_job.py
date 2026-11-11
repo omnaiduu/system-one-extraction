@@ -156,7 +156,10 @@ def main_v2() -> None:
     run(["constrained"], "SYSTEM_FORMULA_V2", "formula_v2_results")
 
 
-def run(wanted: list[str], prompt_name: str, out_name: str) -> None:
+def run(wanted: list[str], prompt_name: str, out_name: str, parts=None, receipts: bool = True,
+        model=None, tokenizer=None, previous=PREVIOUS) -> dict:
+    """Score the LLM with one prompt in the wanted modes. `parts`: [(name, notes, only fields)], default the dev sets.
+    A model and tokenizer already loaded can be passed in (the head-to-head job runs two prompts on one model)."""
     import torch
     import transformers
 
@@ -171,11 +174,12 @@ def run(wanted: list[str], prompt_name: str, out_name: str) -> None:
 
     started = time.time()
     device = "cuda:0"
-    tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL)
-    model = transformers.AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float16, device_map=device)
-    model.eval()
-    model.requires_grad_(False)
-    payload = {"model": MODEL, "prompt": prompt_name, "previous": PREVIOUS, "modes": {}}
+    if model is None:
+        tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL)
+        model = transformers.AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float16, device_map=device)
+        model.eval()
+        model.requires_grad_(False)
+    payload = {"model": MODEL, "prompt": prompt_name, "previous": previous, "modes": {}}
     stats = {}
 
     def render(messages) -> str:
@@ -240,14 +244,8 @@ def run(wanted: list[str], prompt_name: str, out_name: str) -> None:
         (OUT / f"{out_name}.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
         (OUT / f"{out_name}.md").write_text(summarize(payload))
 
-    rows = [r for r in load_rows() if r["split"] != "exam4"]
-    dev = [r for r in rows if r["split"] in ("exam1", "exam2", "exam3")]
-    chains = test_variants(dev, seed=23)
-    parts = [("computed single", [r for r in chains if r["chain_test"] == "single"], ["calc_0"]),
-             ("computed combo_seen", [r for r in chains if r["chain_test"] == "combo_seen"], ["calc_0"]),
-             ("computed combo_unseen", [r for r in chains if r["chain_test"] == "combo_unseen"], ["calc_0"]),
-             ("exams1-3", dev, None),
-             ("words", augment(dev, seed=23, templates=TEST_TEMPLATES, emits=0), None)]
+    if parts is None:
+        parts = dev_parts()
     modes = [m for m in wanted if m == "free" or grammar["available"]] or ["free"]
     for mode in modes:
         generate = make_generate(mode)
@@ -262,14 +260,16 @@ def run(wanted: list[str], prompt_name: str, out_name: str) -> None:
             log(f"{mode} {name}: first {part['first']}/{part['fields']}, after retry {part['after_retry']}, "
                 f"accepted {part['accepted_right']}/{part['accepted']}, withheld {part['withheld']}")
             save()
+    if not receipts:
+        return payload
 
     # Real receipts, once, in the last mode.
     mode = modes[-1]
     generate = make_generate(mode)
     roots = sorted(path for path in INPUT.rglob("SROIE2019/test") if (path / "box").is_dir())
-    receipts, skipped = sroie.load_split(roots[0])
+    receipt_rows, skipped = sroie.load_split(roots[0])
     first_items, final_items, still = [], [], 0
-    for row in receipts:
+    for row in receipt_rows:
         fields = field_list(row)
         r = answer_note(row, fields, generate, SYSTEM_FORMULA)
         first_items += [(row, f, r["first"]) for f in fields]
@@ -278,11 +278,44 @@ def run(wanted: list[str], prompt_name: str, out_name: str) -> None:
     first, final = score_sroie(first_items), score_sroie(final_items)
     for result in (first, final):
         result.pop("examples", None)  # SROIE may not be redistributed: no receipt-level output
-    payload["sroie"] = {"mode": mode, "receipts": len(receipts), "skipped": skipped, "first": first, "after_retry": final,
+    payload["sroie"] = {"mode": mode, "receipts": len(receipt_rows), "skipped": skipped, "first": first, "after_retry": final,
                         "withheld": still}
     log(f"sroie {mode}: first {first['overall']}, after retry {final['overall']}")
     save()
     log(f"done in {payload['seconds']} s")
+    return payload
+
+
+def dev_parts() -> list:
+    """Exams 1-3, the three computed-field sets (seed 23) and the words notes. Never exam 4."""
+    from experiments.augment import TEST_TEMPLATES, augment
+    from experiments.chains import test_variants
+    from experiments.evidence_data import load_rows
+
+    dev = [r for r in load_rows() if r["split"] in ("exam1", "exam2", "exam3")]
+    chains = test_variants(dev, seed=23)
+    return [("computed single", [r for r in chains if r["chain_test"] == "single"], ["calc_0"]),
+            ("computed combo_seen", [r for r in chains if r["chain_test"] == "combo_seen"], ["calc_0"]),
+            ("computed combo_unseen", [r for r in chains if r["chain_test"] == "combo_unseen"], ["calc_0"]),
+            ("exams1-3", dev, None),
+            ("words", augment(dev, seed=23, templates=TEST_TEMPLATES, emits=0), None)]
+
+
+def exam4_parts() -> list:
+    """Exam 4 the same ways the final job scores our trained system: plain, words (seed 47), computed (seed 59)."""
+    from experiments.augment import TEST_TEMPLATES, augment
+    from experiments.chains import test_variants
+    from experiments.evidence_data import load_rows
+
+    exam4 = [r for r in load_rows() if r["split"] == "exam4"]
+    if not exam4:
+        raise RuntimeError("exam 4 is not in this bundle")
+    chains = test_variants(exam4, seed=59)
+    return [("exam4", exam4, None),
+            ("exam4 words", augment(exam4, seed=47, emits=0, templates=TEST_TEMPLATES), None),
+            ("exam4 computed single", [r for r in chains if r["chain_test"] == "single"], ["calc_0"]),
+            ("exam4 computed combo_seen", [r for r in chains if r["chain_test"] == "combo_seen"], ["calc_0"]),
+            ("exam4 computed combo_unseen", [r for r in chains if r["chain_test"] == "combo_unseen"], ["calc_0"])]
 
 
 def summarize(payload: dict) -> str:

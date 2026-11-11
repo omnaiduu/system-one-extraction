@@ -259,3 +259,33 @@ def test_prompt_v2_only_adds_the_two_rules():
 def test_formula_v2_kernel(tmp_path):
     script = write_kernel(tmp_path / "v2", "formula_v2")
     assert "kaggle_formula_job import main_v2" in script.read_text() and '"xgrammar"' in script.read_text()
+
+
+def test_head_to_head_kernel_carries_exam4_and_both_models(tmp_path):
+    import base64, io, tarfile
+
+    script = write_kernel(tmp_path / "hh", "head_to_head", "ommnaidu/gemma-e2b-lora-onepass,ommnaidu/gemma-e2b-lora-chains")
+    text = script.read_text()
+    assert "kaggle_head_to_head_job import main" in text and '"xgrammar"' in text
+    bundle = text.split("BUNDLE = ")[1].split("\n")[0].strip("'")
+    names = tarfile.open(fileobj=io.BytesIO(base64.b64decode(bundle)), mode="r:gz").getnames()
+    assert any(n.startswith("data/exam4") for n in names)
+    meta = json.loads((tmp_path / "hh" / "kernel-metadata.json").read_text())
+    assert meta["kernel_sources"] == ["ommnaidu/gemma-e2b-lora-onepass", "ommnaidu/gemma-e2b-lora-chains"]
+    assert meta["dataset_sources"] == []
+    # Every other job still leaves exam 4 out.
+    for job_name in ("formula", "formula_v2", "hybrid"):
+        other = write_kernel(tmp_path / job_name, job_name, "ommnaidu/gemma-e2b-lora-onepass").read_text()
+        b = other.split("BUNDLE = ")[1].split("\n")[0].strip("'")
+        assert not any(n.startswith("data/exam4") for n in tarfile.open(fileobj=io.BytesIO(base64.b64decode(b)), mode="r:gz").getnames())
+
+
+def test_head_to_head_summary_reads_both_systems():
+    from experiments.kaggle_head_to_head_job import summarize
+
+    part = {"first": 10, "after_retry": 12, "fields": 20, "accepted_right": 11, "accepted": 18}
+    llm = {"modes": {"constrained": {"parts": {"exam4": part}}}}
+    ours = {"exam4": {"values": {"exact": 9, "fields": 20}}}
+    text = summarize({"notes": {"exam4": 24}, "llm": {"SYSTEM_FORMULA": llm, "SYSTEM_FORMULA_V2": llm},
+                      "ours": {"experiment 4": ours, "experiment 6": {"error": "x"}}})
+    assert "**12**/20" in text and "9/20" in text and "error" in text

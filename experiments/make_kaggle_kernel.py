@@ -34,6 +34,9 @@ JOBS = {
     # Formulas, the page check with one retry, and structured output (xgrammar). Reads SROIE; no exam 4.
     "formula": ("ommnaidu/gemma-e2b-formula", "Gemma E2B formula", "experiments.kaggle_formula_job", "main"),
     "formula_v2": ("ommnaidu/gemma-e2b-formula-v2", "Gemma E2B formula v2", "experiments.kaggle_formula_job", "main_v2"),
+    # The exam-4 head-to-head, run once: LLM (prompt v1 and v2) and our experiment-4 and -6 models.
+    # Needs both model kernels as sources: make_kaggle_kernel.py OUT head_to_head SOURCE1,SOURCE2
+    "head_to_head": ("ommnaidu/gemma-e2b-head-to-head", "Gemma E2B exam4 head to head", "experiments.kaggle_head_to_head_job", "main"),
     # Only the second half of "hybrid": our experiment-4 model on SROIE (no LLM generation).
     "ours_sroie": ("ommnaidu/gemma-e2b-ours-sroie", "Gemma E2B ours SROIE", "experiments.kaggle_hybrid_job", "main_ours"),
     # The final grade. The only job whose bundle contains exam 4. Needs the
@@ -41,7 +44,7 @@ JOBS = {
     "final": ("ommnaidu/gemma-e2b-final-grade", "Gemma E2B final grade", "experiments.kaggle_final_job", "main"),
 }
 SROIE_DATASET = "urbikn/sroie-datasetv2"
-EXTRA_PACKAGES = {"structured": ', "lm-format-enforcer"', "formula": ', "xgrammar"', "formula_v2": ', "xgrammar"'}
+EXTRA_PACKAGES = {"structured": ', "lm-format-enforcer"', "formula": ', "xgrammar"', "formula_v2": ', "xgrammar"', "head_to_head": ', "xgrammar"'}
 
 INCLUDE_DIRS = ("extractor", "experiments")
 EXCLUDED_RAW = ("data/exam4",)
@@ -88,7 +91,7 @@ def make_bundle(include_exam4: bool = False) -> str:
 
 def write_kernel(out_dir: Path, job: str = "question_order", source_kernel: str | None = None) -> Path:
     kernel_id, title, module, function = JOBS[job]
-    final = job == "final"
+    final = job in ("final", "head_to_head")  # the only jobs whose bundle carries exam 4
     if final and not source_kernel:
         raise ValueError("the final job needs the trained model's kernel as a source")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -106,8 +109,8 @@ def write_kernel(out_dir: Path, job: str = "question_order", source_kernel: str 
         "enable_tpu": False,
         "enable_internet": True,
         "keywords": [],
-        "dataset_sources": [SROIE_DATASET] if final or job in ("structured", "hybrid", "ours_sroie", "formula", "formula_v2") else [],
-        "kernel_sources": [source_kernel] if source_kernel and job in ("final", "hybrid", "ours_sroie") else [],
+        "dataset_sources": [SROIE_DATASET] if job == "final" or job in ("structured", "hybrid", "ours_sroie", "formula", "formula_v2") else [],
+        "kernel_sources": source_kernel.split(",") if source_kernel and job in ("final", "hybrid", "ours_sroie", "head_to_head") else [],
         "competition_sources": [],
         "model_sources": [],
         "machine_shape": "NvidiaTeslaT4",

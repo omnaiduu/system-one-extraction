@@ -93,6 +93,14 @@ def summarize(payload: dict) -> str:
 
 
 def main() -> None:
+    payload = score_checkpoint(find_one("*_adapter.pt"), receipts=True)
+    (OUT / "final_results.json").write_text(json.dumps(payload, indent=2) + "\n")
+    (OUT / "final_results.md").write_text(summarize(payload))
+    log(f"done in {payload['seconds']} s")
+
+
+def score_checkpoint(adapter_path: Path, receipts: bool = True) -> dict:
+    """Load one trained model from its checkpoint and score it on exam 4 (and SROIE if asked)."""
     import torch
     import transformers
     from peft import LoraConfig, inject_adapter_in_model
@@ -105,7 +113,6 @@ def main() -> None:
 
     started = time.time()
     device = "cuda:0"
-    adapter_path = find_one("*_adapter.pt")
     checkpoint = torch.load(adapter_path, map_location="cpu", weights_only=False)
     layout = checkpoint.get("layout", "first")
     bias = float(checkpoint["bias"])
@@ -197,7 +204,9 @@ def main() -> None:
             c = payload["exam4_chains"][kind]["computed"]
             log(f"exam 4 {kind}: computed {c['exact']}/{c['fields']}")
     log(f"exam 4: final answers {payload['exam4']['values']['exact']}/{payload['exam4']['values']['fields']}")
-    (OUT / "final_results.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
+    if not receipts:
+        payload["seconds"] = round(time.time() - started, 1)
+        return json.loads(json.dumps(payload, default=str))
 
     roots = sorted(path for path in INPUT.rglob("SROIE2019/test") if (path / "box").is_dir())
     if not roots:
@@ -211,7 +220,4 @@ def main() -> None:
     log(f"sroie: found {o['found']}/{o['fields']}, value {o['value']}, wide dates {o['value_wide_dates']}")
 
     payload["seconds"] = round(time.time() - started, 1)
-    payload = json.loads(json.dumps(payload, default=str))
-    (OUT / "final_results.json").write_text(json.dumps(payload, indent=2) + "\n")
-    (OUT / "final_results.md").write_text(summarize(payload))
-    log(f"done in {payload['seconds']} s")
+    return json.loads(json.dumps(payload, default=str))
