@@ -40,6 +40,7 @@ MAX_LENGTH = 300
 CONSTANTS = {Decimal(0), Decimal(1), Decimal(100)}  # allowed in a formula without being on the page
 _ISO = re.compile(r"""date\(\s*["']?(\d{4}-\d{2}-\d{2})["']?\s*\)|["']?(\d{4}-\d{2}-\d{2})["']?""")
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_WIDE_NUMERIC = re.compile(r"(?<!\d)(\d{1,4})[/\-.](\d{1,2})[/\-.](\d{2,4})(?!\d)")
 
 
 class FormulaError(ValueError):
@@ -232,6 +233,15 @@ def page_values(text: str, dayfirst: bool = True) -> tuple[set[Decimal], set[dat
         except InvalidOperation:
             pass
     dates = set()
+    # Receipt forms the note patterns miss: 15-01-2019, 15.01.2019, 15/01/19 (either order of day and month).
+    for match in _WIDE_NUMERIC.finditer(text):
+        a, b, c = (int(x) for x in match.groups())
+        year = a if a > 31 else c + (2000 if c < 100 else 0)
+        for month, day in ((b, c),) if a > 31 else ((b, a), (a, b)):
+            try:
+                dates.add(date(year, month, day))
+            except ValueError:
+                pass
     for pattern in _DATES:
         for match in pattern.finditer(text):
             for first in (dayfirst, not dayfirst):

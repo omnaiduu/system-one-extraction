@@ -147,6 +147,16 @@ def score_part(results: list[tuple[list[dict], dict]]) -> dict:
 
 
 def main() -> None:
+    """First run: both modes, prompt version 1, SROIE in the constrained mode."""
+    run(["free", "constrained"], "SYSTEM_FORMULA", "formula_results")
+
+
+def main_v2() -> None:
+    """Second run: constrained only, prompt version 2, and the page check that reads receipt dates (15-01-19)."""
+    run(["constrained"], "SYSTEM_FORMULA_V2", "formula_v2_results")
+
+
+def run(wanted: list[str], prompt_name: str, out_name: str) -> None:
     import torch
     import transformers
 
@@ -154,7 +164,10 @@ def main() -> None:
     from experiments.augment import TEST_TEMPLATES, augment
     from experiments.chains import test_variants
     from experiments.evidence_data import load_rows
-    from experiments.structured_baseline import SYSTEM_FORMULA, field_list, parse_reply, score_sroie
+    from experiments import structured_baseline
+    from experiments.structured_baseline import field_list, parse_reply, score_sroie
+
+    SYSTEM_FORMULA = getattr(structured_baseline, prompt_name)
 
     started = time.time()
     device = "cuda:0"
@@ -162,7 +175,7 @@ def main() -> None:
     model = transformers.AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float16, device_map=device)
     model.eval()
     model.requires_grad_(False)
-    payload = {"model": MODEL, "previous": PREVIOUS, "modes": {}}
+    payload = {"model": MODEL, "prompt": prompt_name, "previous": PREVIOUS, "modes": {}}
     stats = {}
 
     def render(messages) -> str:
@@ -224,8 +237,8 @@ def main() -> None:
             payload["modes"].setdefault(mode, {})["generation"] = {
                 **s, "seconds_per_generation": round(s["seconds"] / max(s["generations"], 1), 2)}
         payload["seconds"] = round(time.time() - started, 1)
-        (OUT / "formula_results.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
-        (OUT / "formula_results.md").write_text(summarize(payload))
+        (OUT / f"{out_name}.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
+        (OUT / f"{out_name}.md").write_text(summarize(payload))
 
     rows = [r for r in load_rows() if r["split"] != "exam4"]
     dev = [r for r in rows if r["split"] in ("exam1", "exam2", "exam3")]
@@ -235,7 +248,7 @@ def main() -> None:
              ("computed combo_unseen", [r for r in chains if r["chain_test"] == "combo_unseen"], ["calc_0"]),
              ("exams1-3", dev, None),
              ("words", augment(dev, seed=23, templates=TEST_TEMPLATES, emits=0), None)]
-    modes = ["free"] + (["constrained"] if grammar["available"] else [])
+    modes = [m for m in wanted if m == "free" or grammar["available"]] or ["free"]
     for mode in modes:
         generate = make_generate(mode)
         payload["modes"].setdefault(mode, {})["parts"] = {}
@@ -273,7 +286,7 @@ def main() -> None:
 
 
 def summarize(payload: dict) -> str:
-    lines = ["# Formulas, the page check and structured output", "",
+    lines = [f"# Formulas, the page check and structured output ({payload.get('prompt')})", "",
              f"Structured output: {payload.get('grammar')}", ""]
     for mode, data in payload["modes"].items():
         gen = data.get("generation", {})

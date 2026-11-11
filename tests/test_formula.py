@@ -235,3 +235,27 @@ def test_formula_kernel_installs_xgrammar_reads_receipts_and_has_no_exam4(tmp_pa
     assert not any(n.startswith("data/exam4") for n in names) and "experiments/formula.py" in names
     meta = json.loads((tmp_path / "f" / "kernel-metadata.json").read_text())
     assert meta["dataset_sources"] == ["urbikn/sroie-datasetv2"] and meta["kernel_sources"] == []
+
+
+def test_the_page_check_reads_receipt_dates():
+    """The first formula run flagged correct receipt dates written 15-01-2019 or 15.01.19, and the retry broke them."""
+    target = date(2019, 1, 15)
+    for form in ["15/01/2019", "15-01-2019", "15.01.2019", "15/01/19", "15-01-19", "2019-01-15", "15 JAN 2019",
+                 "15-JAN-2019", "15JAN2019", "Jan 15, 2019", "DATE:15/01/2019 11:30", "15.01.19 14:02"]:
+        page = fm.page_values(f"TOTAL 12.50 {form} THANK YOU")
+        assert fm.date_on_page(target, page), form
+        assert fm.check("2019-01-15", {"type": "date"}, page) == [], form
+    assert not fm.date_on_page(date(2019, 1, 16), fm.page_values("15-01-2019 TOTAL 12.50"))
+
+
+def test_prompt_v2_only_adds_the_two_rules():
+    assert sb.SYSTEM_FORMULA_V2.startswith(sb.SYSTEM_FORMULA.split("   - Follow the order")[0])
+    added = set(sb.SYSTEM_FORMULA_V2.splitlines()) - set(sb.SYSTEM_FORMULA.splitlines())
+    assert len(added) == 2 and all(line.startswith("   - ") for line in added)
+    exam_text = " ".join(r["text"] for r in _dev())
+    assert "2026-05-01" not in exam_text
+
+
+def test_formula_v2_kernel(tmp_path):
+    script = write_kernel(tmp_path / "v2", "formula_v2")
+    assert "kaggle_formula_job import main_v2" in script.read_text() and '"xgrammar"' in script.read_text()

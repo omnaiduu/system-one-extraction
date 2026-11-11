@@ -215,6 +215,17 @@ Answer:
 {"amount": 120000, "signed": "2026-04-02", "items": ["oak table", "two chairs", "a lamp"], "pickup": "14:15", "nights": {"formula": "2026-03-07 - 2026-03-03"}, "typical": {"formula": "median(80, 95, 120)"}}
 """
 
+# Version 2 (note 21): two general rules added after the first formula run, where most wrong two-step
+# answers dropped brackets (a + b / 3) or a date step counted from another calculated date.
+SYSTEM_FORMULA_V2 = SYSTEM_FORMULA.replace(
+    """   - Follow the order the document describes, with brackets: (a + b) / 4 when a total is split four ways.
+   The formula is computed exactly by code.""",
+    """   - Follow the order the document describes, with brackets: (a + b) / 4 when a total is split four ways.
+   - Brackets matter: a + b / 3 divides only b. Put a total in brackets before dividing, multiplying or adding a percentage to it: (a + b) / 3, (a + b) * (1 + 18%).
+   - A date counted from another date that is itself calculated: chain them in one formula, 2026-05-01 + weeks(2) - days(3).
+   The formula is computed exactly by code.""")
+assert SYSTEM_FORMULA_V2 != SYSTEM_FORMULA
+
 # Asked once more, only for fields whose answer used a value that is not printed in the document.
 RETRY = """These answers use values that are not printed in the document:
 {problems}
