@@ -5,7 +5,8 @@ name: tests
 
 on:
   push:
-    branches: [claude/check-this-out-yubis2]
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
